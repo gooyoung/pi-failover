@@ -43,10 +43,10 @@ gh release create "$TAG" --title "$TAG" --generate-notes
 ```
 
 工作流再次执行 `npm ci`、`npm test`、`npm run typecheck` 和
-`npm pack --dry-run`，随后发布 `pi-failover`。确认 npm 发布成功后，弃用旧包：
+`npm pack --dry-run`，随后发布 `pi-failover`。确认 npm 发布成功后，如需弃用历史包名，可执行：
 
 ```bash
-npm deprecate '@gooyoung/pi-keyrouter@*' 'Deprecated: migrate to pi-failover'
+npm deprecate '<legacy-package-name>@*' 'Deprecated: migrate to pi-failover'
 ```
 
 ## 发布后检查

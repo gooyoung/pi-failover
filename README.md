@@ -1,20 +1,34 @@
 # pi-failover
 
-Credential and provider failover for [Pi coding agent](https://github.com/nicobailon/pi-coding-agent) `>=0.84.2`.
+Automatic credential and provider failover for [Pi coding agent](https://github.com/nicobailon/pi-coding-agent) `>=0.84.2`.
+
+- [中文说明](./README.zh-CN.md)
 
 ```bash
 pi install npm:pi-failover
 ```
 
-## Configuration
+`pi-failover` helps a Pi session keep going when the current credential or provider becomes unavailable. It works with Pi's existing `auth.json` and adds one extension field, `"key-backup"`, for API-key providers.
 
-pi-failover reads **only** `auth.json` from Pi's `getAgentDir()`: by default
-`~/.pi/agent/auth.json`. The `PI_CODING_AGENT_DIR` environment variable remains
-compatible with Pi's agent-directory resolution. It never reads or writes
-`keyrouter.json`.
+## Quick Start
 
-Keep Pi's existing primary credential and add a literal, non-empty
-`"key-backup"` string to an API-key provider:
+### 1. Install the extension
+
+```bash
+pi install npm:pi-failover
+```
+
+### 2. Edit `auth.json`
+
+`pi-failover` reads only Pi's `auth.json` from `getAgentDir()`, which is usually:
+
+```text
+~/.pi/agent/auth.json
+```
+
+If `PI_CODING_AGENT_DIR` is set, Pi's own agent-directory resolution still applies.
+
+Keep Pi's primary credential as-is and add a literal, non-empty `"key-backup"` string to any API-key provider that should have a same-provider backup:
 
 ```json
 {
@@ -32,52 +46,71 @@ Keep Pi's existing primary credential and add a literal, non-empty
 }
 ```
 
-An OAuth entry is a provider fallback candidate but has no backup credential.
-`key-backup` means a secondary key for the same provider, distinct from
-provider fallback across different providers.
-Its finite numeric `expires` value is normally written and preserved by Pi's
-`/login` flow.
-`key-backup` is not expanded from environment variables or commands. Provider
-fallback order is the top-level insertion order in `auth.json`.
+### 3. Verify that failover is active
 
-To migrate manually from `~/.pi/keyrouter.json`, copy each provider's primary
-credential into its Pi `auth.json` entry and put its second key in
-`"key-backup"`; order the entries as you want providers tried. There is no
-dual-read migration path. Pi's `/login` can rewrite `auth.json` and discard
-unknown extension fields, so re-add `"key-backup"` after logging in.
+Start Pi and run:
 
-## Failover behavior
+```text
+/failover status
+```
 
-For each turn, a credential or provider is tried at most once. A successful
-2xx response marks the active credential/provider healthy.
+The command shows redacted runtime status only. It never prints raw credential values.
 
-| Failure | Action |
+If the active key receives a retryable failure during a turn, `pi-failover` can:
+
+- switch to the backup key for the same provider
+- switch to the next configured provider
+- keep Pi's original error when every configured option is exhausted
+
+## Configuration Notes
+
+- `pi-failover` never reads or writes `keyrouter.json`.
+- `"key-backup"` is a second key for the same provider, not a provider fallback.
+- Provider fallback order follows the top-level insertion order in `auth.json`.
+- OAuth entries can participate in provider fallback, but they do not support `"key-backup"`.
+- `"key-backup"` is treated as a literal string. It is not expanded from environment variables or commands.
+- Pi's `/login` flow can rewrite `auth.json` and remove unknown extension fields, so `"key-backup"` may need to be re-added after logging in again.
+
+## How Failover Works
+
+For each turn, a credential or provider is tried at most once. A successful `2xx` response marks the active credential or provider healthy.
+
+| Failure | What pi-failover does |
 | --- | --- |
-| 401 / 403 | Disable the current credential for the session; use its backup, then the next provider. |
-| 429 | Cool down the current credential; use `Retry-After`, or 60 seconds when absent, then use its backup. |
-| 529 / overloaded | Cool down the provider; use `Retry-After`, or 30 seconds when absent, then change provider. |
-| 500, 502, 503, 504, network, timeout | Cool down the provider for 30 seconds, then change provider. |
-| Other errors | Leave Pi's normal error handling unchanged. |
+| `401` / `403` | Disables the current credential for the session, then tries its backup key, then the next provider. |
+| `429` | Cools down the current credential by `Retry-After`, or by 60 seconds when the header is absent, then tries its backup key. |
+| `529` or overloaded responses | Cools down the provider by `Retry-After`, or by 30 seconds when the header is absent, then changes provider. |
+| `500`, `502`, `503`, `504`, network, timeout | Cools down the provider for 30 seconds, then changes provider. |
+| Other failures | Leaves Pi's normal error handling unchanged. |
 
-On provider fallback, pi-failover prefers the current model id and otherwise
-uses that provider's first available model. It calls Pi's `setModel()`, so the
-new default model persists. There is no automatic failback.
+When switching providers, `pi-failover` prefers the current model ID. If that model is unavailable on the next provider, it uses that provider's first available model. The extension calls Pi's `setModel()`, so the new default model persists. There is no automatic failback to the original provider later.
 
-## Commands and output modes
+## Commands
 
-- `/failover status` shows the redacted runtime status.
-- `/failover reload` restores extension-owned overrides, then rereads `auth.json`.
+- `/failover status`: shows redacted failover state
+- `/failover reload`: restores extension-owned overrides, then rereads `auth.json`
+
+## Output Modes
 
 | Mode | Notifications |
 | --- | --- |
 | TUI | Yes |
 | RPC | Yes |
-| JSON | No UI or injected messages |
-| print | No UI or injected messages |
+| JSON | No UI notifications or injected messages |
+| print | No UI notifications or injected messages |
 
-pi-failover never prints credential values or includes them in status and error
-messages. Treat `auth.json` as a secret file: do not commit it and restrict its
-permissions appropriately.
+## Migration Notes
+
+If migrating from `~/.pi/keyrouter.json`, move each provider's primary credential into Pi's `auth.json`, then place the second key for that provider in `"key-backup"`. Reorder the top-level entries in `auth.json` to control provider fallback order.
+
+There is no dual-read migration path. `pi-failover` uses only `auth.json`.
+
+## Security Notes
+
+- Treat `auth.json` as a secret file.
+- Do not commit credentials.
+- Restrict file permissions appropriately.
+- `pi-failover` keeps status and error messages redacted.
 
 ## Development
 
