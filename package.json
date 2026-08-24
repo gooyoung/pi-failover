@@ -1,15 +1,15 @@
 {
 	"name": "pi-failover",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Automatic API credential and provider failover for Pi coding agent.",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/gooyoung/pi-keyrouter.git"
+		"url": "git+https://github.com/gooyoung/pi-failover.git"
 	},
 	"bugs": {
-		"url": "https://github.com/gooyoung/pi-keyrouter/issues"
+		"url": "https://github.com/gooyoung/pi-failover/issues"
 	},
-	"homepage": "https://github.com/gooyoung/pi-keyrouter#readme",
+	"homepage": "https://github.com/gooyoung/pi-failover#readme",
 	"type": "module",
 	"packageManager": "npm@11.12.1",
 	"main": "./src/index.ts",
