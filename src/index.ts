@@ -163,6 +163,11 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 					continue;
 				}
 				const backupKey = catalog.providers.find((provider) => provider.provider === activeDecision.providerId)?.backupKey;
+				if (runtime?.hasOwnedOverride(activeDecision.providerId)) {
+					// The backup override is already in effect from a prior turn; re-applying
+					// would only duplicate the runtime write and re-announce the switch.
+					return "applied";
+				}
 				possiblyOwnedProviderIds.add(activeDecision.providerId);
 				const result = backupKey === undefined
 					? { ok: false as const }

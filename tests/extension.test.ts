@@ -257,6 +257,43 @@ test("a 403 backup switch hides the intermediate error and queues exactly one co
 	);
 });
 
+test("the follow-up retry turn does not re-announce an already-applied backup switch", async () => {
+	const harness = createHarness();
+	createFailoverExtension({
+		loadCatalog: () => ({
+			enabled: true,
+			providers: [{ provider: "alpha", type: "api_key", backupKey: "backup-secret" }],
+			diagnostics: [],
+		}),
+		now: () => 1_000,
+	})(harness.pi);
+
+	await harness.emit("session_start", { reason: "startup" });
+	await harness.emit("turn_start", { turnIndex: 0, timestamp: 1_000 });
+	await harness.emit("before_provider_request", { payload: {} });
+	await harness.emit("after_provider_response", { status: 401, headers: {} });
+	await harness.emit("message_end", {
+		message: assistantError("401 unauthorized"),
+	});
+
+	assert.deepEqual(harness.setKeys, ["backup-secret"]);
+	assert.equal(
+		harness.notifications.filter((message) => message === "pi-failover: alpha switched to backup credential").length,
+		1,
+	);
+
+	// triggerTurn retries with a fresh turn while the primary is still disabled,
+	// which previously re-applied the backup switch and announced it again.
+	await harness.emit("turn_start", { turnIndex: 1, timestamp: 2_000 });
+
+	assert.deepEqual(harness.setKeys, ["backup-secret"], "backup key must not be re-set on the retry turn");
+	assert.equal(
+		harness.notifications.filter((message) => message === "pi-failover: alpha switched to backup credential").length,
+		1,
+		"backup switch must not be announced again on the retry turn",
+	);
+});
+
 test("overloaded text on an ordinary 429 switches provider through Pi's model API", async () => {
 	const harness = createHarness({
 		models: [
