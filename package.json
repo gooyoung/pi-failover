@@ -1,0 +1,57 @@
+{
+	"name": "pi-failover",
+	"version": "0.1.0",
+	"description": "Automatic API credential and provider failover for Pi coding agent.",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/gooyoung/pi-keyrouter.git"
+	},
+	"bugs": {
+		"url": "https://github.com/gooyoung/pi-keyrouter/issues"
+	},
+	"homepage": "https://github.com/gooyoung/pi-keyrouter#readme",
+	"type": "module",
+	"packageManager": "npm@11.12.1",
+	"main": "./src/index.ts",
+	"files": [
+		"src",
+		"README.md",
+		"tsconfig.json"
+	],
+	"scripts": {
+		"typecheck": "tsc --noEmit",
+		"test": "tsx --test tests/*.test.ts"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-coding-agent",
+		"extension",
+		"api-key-failover",
+		"credential-failover",
+		"provider-failover",
+		"rate-limit",
+		"fallback"
+	],
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.84.2"
+	},
+	"publishConfig": {
+		"access": "public",
+		"registry": "https://registry.npmjs.org"
+	},
+	"license": "MIT",
+	"engines": {
+		"node": ">=22"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.84.2",
+		"@types/node": "^25.9.1",
+		"tsx": "^4.19.0",
+		"typescript": "^6.0.3"
+	}
+}

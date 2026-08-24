@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+config.json
+.trae/
+.superpowers/
+pnpm-lock.yaml
+yarn.lock
+bun.lockb
