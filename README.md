@@ -33,6 +33,8 @@ Keep Pi's existing primary credential and add a literal, non-empty
 ```
 
 An OAuth entry is a provider fallback candidate but has no backup credential.
+`key-backup` means a secondary key for the same provider, distinct from
+provider fallback across different providers.
 Its finite numeric `expires` value is normally written and preserved by Pi's
 `/login` flow.
 `key-backup` is not expanded from environment variables or commands. Provider

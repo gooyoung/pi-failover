@@ -1,6 +1,6 @@
 # 部署与发布说明
 
-本文档说明 `pi-failover@0.1.0` 的发布流程。当前 GitHub 仓库的自动发布由
+本文档说明 `pi-failover` 的发布流程。当前 GitHub 仓库的自动发布由
 [`.github/workflows/publish.yml`](.github/workflows/publish.yml) 在 GitHub
 Release 发布时触发；Release tag 必须是 `v<package.json version>`。
 
