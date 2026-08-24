@@ -56,11 +56,14 @@ Start Pi and run:
 
 The command shows redacted runtime status only. It never prints raw credential values.
 
-If the active key receives a retryable failure during a turn, `pi-failover` can:
+If the active key receives a handled failure during a user request, `pi-failover` can:
 
 - switch to the backup key for the same provider
 - switch to the next configured provider
-- keep Pi's original error when every configured option is exhausted
+- retry the same user request automatically after a successful switch
+- show only the final provider error when every configured option is exhausted
+
+Intermediate provider errors are replaced by a hidden continuation, so no second user message is required. TUI and RPC modes still show one redacted warning for each applied credential or provider switch.
 
 ## Configuration Notes
 
@@ -73,14 +76,14 @@ If the active key receives a retryable failure during a turn, `pi-failover` can:
 
 ## How Failover Works
 
-For each turn, a credential or provider is tried at most once. A successful `2xx` response marks the active credential or provider healthy.
+Within one user request, failed credentials and providers are disabled or cooled before the hidden continuation runs. A successful `2xx` response marks the active credential or provider healthy.
 
 | Failure | What pi-failover does |
 | --- | --- |
-| `401` / `403` | Disables the current credential for the session, then tries its backup key, then the next provider. |
-| `429` | Cools down the current credential by `Retry-After`, or by 60 seconds when the header is absent, then tries its backup key. |
-| `529` or overloaded responses | Cools down the provider by `Retry-After`, or by 30 seconds when the header is absent, then changes provider. |
-| `500`, `502`, `503`, `504`, network, timeout | Cools down the provider for 30 seconds, then changes provider. |
+| `401` / `403` | Disables the current credential for the session, switches to its backup key or the next provider, then retries the same request. |
+| `429` | Cools down the current credential by `Retry-After`, or by 60 seconds when the header is absent, switches to its backup key, then retries. |
+| `529` or overloaded responses | Cools down the provider by `Retry-After`, or by 30 seconds when the header is absent, changes provider, then retries. |
+| `500`, `502`, `503`, `504`, network, timeout | Cools down the provider for 30 seconds, changes provider, then retries. |
 | Other failures | Leaves Pi's normal error handling unchanged. |
 
 When switching providers, `pi-failover` prefers the current model ID. If that model is unavailable on the next provider, it uses that provider's first available model. The extension calls Pi's `setModel()`, so the new default model persists. There is no automatic failback to the original provider later.
@@ -96,8 +99,8 @@ When switching providers, `pi-failover` prefers the current model ID. If that mo
 | --- | --- |
 | TUI | Yes |
 | RPC | Yes |
-| JSON | No UI notifications or injected messages |
-| print | No UI notifications or injected messages |
+| JSON | No UI notifications; transparent retries still run |
+| print | No UI notifications; transparent retries still run |
 
 ## Migration Notes
 

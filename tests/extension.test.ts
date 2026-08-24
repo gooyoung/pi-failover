@@ -17,6 +17,14 @@ interface NotificationCall {
 	level?: string;
 }
 
+interface SentMessageCall {
+	message: unknown;
+	options?: {
+		triggerTurn?: boolean;
+		deliverAs?: "steer" | "followUp" | "nextTurn";
+	};
+}
+
 function createHarness(options: {
 	models?: TestModel[];
 	setModel?: (model: TestModel) => boolean | Promise<boolean>;
@@ -38,7 +46,7 @@ function createHarness(options: {
 	const removeAttempts = new Map<string, number>();
 	const notifications: string[] = [];
 	const notificationCalls: NotificationCall[] = [];
-	const sentMessages: unknown[] = [];
+	const sentMessageCalls: SentMessageCall[] = [];
 	const appliedModels: TestModel[] = [];
 	const runtime = options.runtimeSupported === false
 		? {}
@@ -103,8 +111,8 @@ function createHarness(options: {
 			if (applied) ctx.model = model;
 			return applied;
 		},
-		sendMessage(message: unknown) {
-			sentMessages.push(message);
+		sendMessage(message: unknown, options?: SentMessageCall["options"]) {
+			sentMessageCalls.push({ message, options });
 		},
 	} as unknown as ExtensionAPI;
 
@@ -131,7 +139,7 @@ function createHarness(options: {
 		removedProviders,
 		notifications,
 		notificationCalls,
-		sentMessages,
+		sentMessageCalls,
 		appliedModels,
 		resolvedKeys,
 	};
@@ -157,6 +165,26 @@ function assistantError(errorMessage: string) {
 	return { role: "assistant", stopReason: "error", errorMessage, content: [] };
 }
 
+const retryMessageCall: SentMessageCall = {
+	message: {
+		customType: "pi-failover-retry",
+		content: "Retry the current user request now using the failover credential or provider. Do not mention this internal retry.",
+		display: false,
+	},
+	options: { triggerTurn: true, deliverAs: "followUp" },
+};
+
+function assertHiddenRetry(result: unknown, message: ReturnType<typeof assistantError>): void {
+	assert.deepEqual(result, {
+		message: {
+			...message,
+			content: [],
+			stopReason: "stop",
+			errorMessage: undefined,
+		},
+	});
+}
+
 async function startSessionTurn(harness: ExtensionHarness, turnIndex = 0): Promise<void> {
 	if (turnIndex === 0) await harness.emit("session_start", { reason: "startup" });
 	await harness.emit("turn_start", { turnIndex, timestamp: 1_000 + turnIndex });
@@ -175,7 +203,7 @@ async function failAttempt(
 	return { message, result };
 }
 
-test("a 401 response rotates to the provider backup before Pi retries and preserves the assistant error", async () => {
+test("a 401 response rotates to the provider backup and hides the intermediate error", async () => {
 	const harness = createHarness();
 	createFailoverExtension({
 		loadCatalog: () => ({
@@ -199,9 +227,34 @@ test("a 401 response rotates to the provider backup before Pi retries and preser
 	const result = await harness.emit("message_end", { message });
 
 	assert.deepEqual(harness.setKeys, ["backup-secret"]);
-	assert.equal(result, undefined);
+	assertHiddenRetry(result, message);
 	assert.equal(message.errorMessage, "request failed because the service claims it is overloaded");
-	assert.deepEqual(harness.sentMessages, []);
+	assert.deepEqual(harness.sentMessageCalls, [retryMessageCall]);
+});
+
+test("a 403 backup switch hides the intermediate error and queues exactly one continuation", async () => {
+	const harness = createHarness();
+	installExtension(harness, [
+		{ provider: "alpha", type: "api_key", backupKey: "backup-secret" },
+	]);
+
+	await startSessionTurn(harness);
+	await harness.emit("before_provider_request", { payload: {} });
+	await harness.emit("after_provider_response", { status: 403, headers: {} });
+	const failedMessage = assistantError(
+		'403: {"message":"Access to model denied.","type":"AccessDenied.Unpurchased","code":"AccessDenied.Unpurchased"}',
+	);
+	const firstResult = await harness.emit("message_end", { message: failedMessage });
+	const duplicateResult = await harness.emit("message_end", { message: failedMessage });
+
+	assert.deepEqual(harness.setKeys, ["backup-secret"]);
+	assertHiddenRetry(firstResult, failedMessage);
+	assert.equal(duplicateResult, undefined);
+	assert.deepEqual(harness.sentMessageCalls, [retryMessageCall]);
+	assert.equal(
+		harness.notifications.filter((message) => message === "pi-failover: alpha switched to backup credential").length,
+		1,
+	);
 });
 
 test("overloaded text on an ordinary 429 switches provider through Pi's model API", async () => {
@@ -314,7 +367,7 @@ test("a rejected backup override continues to provider fallback without surfacin
 	});
 
 	assert.equal(harness.ctx.model?.provider, "beta");
-	assert.deepEqual(harness.sentMessages, []);
+	assert.deepEqual(harness.sentMessageCalls, [retryMessageCall]);
 	assert.doesNotMatch(harness.notifications.join("\n"), new RegExp(backupSecret));
 });
 
@@ -350,7 +403,7 @@ test("total exhaustion restores an owned override and preserves the final assist
 	assert.deepEqual(harness.removedProviders, ["alpha"]);
 	assert.equal(result, undefined);
 	assert.equal(finalMessage.errorMessage, "backup rejected by provider");
-	assert.deepEqual(harness.sentMessages, []);
+	assert.deepEqual(harness.sentMessageCalls, [retryMessageCall]);
 });
 
 test("reload and shutdown restore owned overrides while the failover command stays redacted", async () => {
@@ -451,7 +504,7 @@ test("an exact successful response takes precedence over conflicting assistant e
 	assert.deepEqual(harness.removedProviders, []);
 });
 
-test("json and print modes make no UI calls or message injections", async () => {
+test("json and print modes make no UI calls while still queuing a hidden continuation", async () => {
 	for (const mode of ["json", "print"] as const) {
 		const harness = createHarness({ mode, hasUI: false });
 		createFailoverExtension({
@@ -472,7 +525,7 @@ test("json and print modes make no UI calls or message injections", async () => 
 		});
 
 		assert.deepEqual(harness.notifications, []);
-		assert.deepEqual(harness.sentMessages, []);
+		assert.deepEqual(harness.sentMessageCalls, [retryMessageCall]);
 	}
 });
 
@@ -624,9 +677,9 @@ for (const { mode, expectsNotifications } of [
 		assert.deepEqual(harness.ctx.model, { provider: "beta", id: "shared" });
 		assert.equal(primaryError.message.errorMessage, "primary rate limited");
 		assert.equal(backupError.message.errorMessage, "backup rate limited");
-		assert.equal(primaryError.result, undefined);
-		assert.equal(backupError.result, undefined);
-		assert.deepEqual(harness.sentMessages, []);
+		assertHiddenRetry(primaryError.result, primaryError.message);
+		assertHiddenRetry(backupError.result, backupError.message);
+		assert.deepEqual(harness.sentMessageCalls, [retryMessageCall, retryMessageCall]);
 		assert.equal(harness.notificationCalls.length, expectsNotifications ? 2 : 0);
 		assert.doesNotMatch(JSON.stringify(harness.notificationCalls), new RegExp(alphaBackup));
 	});
@@ -724,7 +777,7 @@ test("401 walks primary to backup to provider without cycling and restores all o
 		"beta primary unauthorized",
 		"beta backup unauthorized",
 	]);
-	assert.deepEqual(harness.sentMessages, []);
+	assert.deepEqual(harness.sentMessageCalls, [retryMessageCall, retryMessageCall, retryMessageCall, retryMessageCall]);
 	assert.ok(harness.notificationCalls.some(({ level }) => level === "warning"));
 	assert.ok(harness.notificationCalls.some(({ level }) => level === "error"));
 	assert.doesNotMatch(
@@ -787,7 +840,7 @@ test("reload and shutdown restore the owned backup and keep status and warning n
 	await harness.emit("session_shutdown", { reason: "quit" });
 
 	assert.deepEqual(harness.removedProviders, ["alpha", "alpha"]);
-	assert.deepEqual(harness.sentMessages, []);
+	assert.deepEqual(harness.sentMessageCalls, [retryMessageCall, retryMessageCall]);
 	assert.ok(harness.notificationCalls.some(({ level }) => level === "info"));
 	assert.ok(harness.notificationCalls.some(({ level }) => level === "warning"));
 	assert.doesNotMatch(

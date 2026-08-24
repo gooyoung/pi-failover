@@ -56,11 +56,14 @@ pi install npm:pi-failover
 
 该命令只显示脱敏后的运行时状态，不会输出原始凭证值。
 
-当当前 key 在一次 turn 中遇到可重试故障时，`pi-failover` 会按情况执行：
+当当前 key 在一次用户请求中遇到已接管的故障时，`pi-failover` 会按情况执行：
 
 - 切到同一 provider 的备用 key
 - 切到下一个已配置 provider
-- 当所有可选项都耗尽时，保留 Pi 原始错误
+- 成功切换后自动重试同一次用户请求
+- 当所有可选项都耗尽时，只显示最后一次 provider 错误
+
+中间 provider 错误会被替换为隐藏的续跑消息，因此用户无需再次发送相同内容。TUI 和 RPC 模式仍会为每次实际生效的凭据或 provider 切换显示一条脱敏警告。
 
 ## 配置说明
 
@@ -73,14 +76,14 @@ pi install npm:pi-failover
 
 ## 故障切换规则
 
-每个 turn 内，同一个凭证或 provider 最多只会尝试一次。收到成功的 `2xx` 响应后，当前凭证或 provider 会被标记为健康。
+同一次用户请求内，失败的凭证或 provider 会先被禁用或进入冷却，再执行隐藏续跑。收到成功的 `2xx` 响应后，当前凭证或 provider 会被标记为健康。
 
 | 故障类型 | `pi-failover` 的处理方式 |
 | --- | --- |
-| `401` / `403` | 将当前凭证在本次会话中标记为不可用，然后依次尝试该 provider 的备用 key 和下一个 provider。 |
-| `429` | 按 `Retry-After` 冷却当前凭证；如果没有该响应头，则冷却 60 秒，然后尝试备用 key。 |
-| `529` 或 overloaded 响应 | 按 `Retry-After` 冷却当前 provider；如果没有该响应头，则冷却 30 秒，然后切换 provider。 |
-| `500`、`502`、`503`、`504`、网络错误、超时 | 将当前 provider 冷却 30 秒，然后切换 provider。 |
+| `401` / `403` | 将当前凭证在本次会话中标记为不可用，切换到备用 key 或下一个 provider，然后重试同一次请求。 |
+| `429` | 按 `Retry-After` 冷却当前凭证；如果没有该响应头，则冷却 60 秒，切换到备用 key 后重试。 |
+| `529` 或 overloaded 响应 | 按 `Retry-After` 冷却当前 provider；如果没有该响应头，则冷却 30 秒，切换 provider 后重试。 |
+| `500`、`502`、`503`、`504`、网络错误、超时 | 将当前 provider 冷却 30 秒，切换 provider 后重试。 |
 | 其他故障 | 保持 Pi 原有的错误处理逻辑，不额外接管。 |
 
 发生 provider 切换时，`pi-failover` 会优先保留当前 model ID；如果目标 provider 没有该 model，则退回到该 provider 的第一个可用 model。扩展内部会调用 Pi 的 `setModel()`，因此新的默认 model 会持续生效；后续不会自动切回原 provider。
@@ -96,8 +99,8 @@ pi install npm:pi-failover
 | --- | --- |
 | TUI | 显示通知 |
 | RPC | 显示通知 |
-| JSON | 不显示 UI 通知，也不注入消息 |
-| print | 不显示 UI 通知，也不注入消息 |
+| JSON | 不显示 UI 通知，但仍会执行透明重试 |
+| print | 不显示 UI 通知，但仍会执行透明重试 |
 
 ## 迁移说明
 

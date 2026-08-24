@@ -23,7 +23,14 @@ interface AttemptResponse {
 	retryAfterMs?: number;
 }
 
+type FailoverExecutionResult = "applied" | "exhausted" | "none";
+
 const OVERLOADED_TEXT = /\boverload(?:ed)?(?:[_ -]?error)?\b/i;
+const RETRY_MESSAGE = {
+	customType: "pi-failover-retry",
+	content: "Retry the current user request now using the failover credential or provider. Do not mention this internal retry.",
+	display: false,
+} as const;
 
 function classifyAttemptFailure(attempt: AttemptResponse, errorMessage: string): FailureObservation {
 	const retryAfter = attempt.retryAfterMs === undefined ? {} : { retryAfterMs: attempt.retryAfterMs };
@@ -119,7 +126,7 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 			}
 		}
 
-		async function execute(initialDecision: FailoverDecision, ctx: ExtensionContext): Promise<void> {
+		async function execute(initialDecision: FailoverDecision, ctx: ExtensionContext): Promise<FailoverExecutionResult> {
 			let decision = initialDecision;
 			while (decision.kind === "switch-key" || decision.kind === "switch-model") {
 				const activeDecision = decision;
@@ -145,12 +152,12 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 							const result = await runtime?.restoreOriginalKey(activeDecision.providerId);
 							if (result?.ok) possiblyOwnedProviderIds.delete(activeDecision.providerId);
 						}
-						return;
+						return "applied";
 					}
 					const result = await runtime?.restoreOriginalKey(activeDecision.providerId);
 					if (result?.ok) {
 						possiblyOwnedProviderIds.delete(activeDecision.providerId);
-						return;
+						return "applied";
 					}
 					decision = engine?.observeFailure({ kind: "provider-error" }) ?? { kind: "exhausted" };
 					continue;
@@ -162,7 +169,7 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 					: await runtime?.setBackupKey(activeDecision.providerId, backupKey);
 				if (result?.ok) {
 					notifyKeySwitch(ctx, activeDecision.providerId, activeDecision.keySlot);
-					return;
+					return "applied";
 				}
 				if (!runtime?.hasOwnedOverride(activeDecision.providerId)) {
 					possiblyOwnedProviderIds.delete(activeDecision.providerId);
@@ -172,7 +179,9 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 			if (decision.kind === "exhausted") {
 				await restoreOwnedOverrides();
 				notifyExhausted(ctx);
+				return "exhausted";
 			}
+			return "none";
 		}
 
 		pi.on("session_start", (_event, ctx) => {
@@ -207,11 +216,24 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 
 		pi.on("message_end", async (event, ctx) => {
 			if (event.message.role !== "assistant" || event.message.stopReason !== "error" || !attempt || !engine) return;
+			const failedAttempt = attempt;
+			attempt = undefined;
 			const errorMessage = event.message.errorMessage ?? "";
-			await execute(
-				engine.observeFailure(classifyAttemptFailure(attempt, errorMessage)),
+			const result = await execute(
+				engine.observeFailure(classifyAttemptFailure(failedAttempt, errorMessage)),
 				ctx,
 			);
+			if (result !== "applied") return;
+
+			pi.sendMessage(RETRY_MESSAGE, { triggerTurn: true, deliverAs: "followUp" });
+			return {
+				message: {
+					...event.message,
+					content: [],
+					stopReason: "stop",
+					errorMessage: undefined,
+				},
+			};
 		});
 
 		pi.on("session_shutdown", async () => {
