@@ -65,6 +65,8 @@ If the active key receives a handled failure during a user request, `pi-failover
 
 Intermediate provider errors are replaced by a hidden continuation, so no second user message is required. TUI and RPC modes still show one redacted warning for each applied credential or provider switch.
 
+If all failover options are exhausted while Pi still has a built-in automatic retry pending, the extension keeps the last active credential in place until that retry finishes. A successful retry keeps that credential active; after a final failure, the extension restores its runtime overrides and reports exhaustion once. This prevents Pi's retry from unexpectedly falling back to a primary credential that already failed.
+
 ## Configuration Notes
 
 - `pi-failover` never reads or writes `keyrouter.json`.
@@ -120,5 +122,8 @@ There is no dual-read migration path. `pi-failover` uses only `auth.json`.
 ```bash
 npm test
 npm run typecheck
+npm run audit
 npm pack --dry-run
 ```
+
+`npm run audit` checks the dev-only dependency tree against the official npm registry. The published package ships no runtime dependencies.

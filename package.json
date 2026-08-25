@@ -20,7 +20,8 @@
 	],
 	"scripts": {
 		"typecheck": "tsc --noEmit",
-		"test": "tsx --test tests/*.test.ts"
+		"test": "tsx --test tests/*.test.ts",
+		"audit": "npm audit --registry=https://registry.npmjs.org"
 	},
 	"keywords": [
 		"pi-package",

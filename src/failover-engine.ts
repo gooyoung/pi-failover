@@ -13,6 +13,12 @@ export interface FailureObservation {
 
 export type KeySlot = "primary" | "backup";
 
+export interface FailoverAttempt {
+	providerId: string;
+	model: string;
+	keySlot: KeySlot;
+}
+
 export interface KeyStatusSnapshot {
 	slot: KeySlot;
 	status: "healthy" | "disabled" | "cooling";
@@ -145,6 +151,17 @@ export class FailoverEngine {
 		return this.decision;
 	}
 
+	resumeAttempt(attempt: FailoverAttempt): boolean {
+		const provider = this.provider(attempt.providerId);
+		const key = provider?.keys.find((candidate) => candidate.slot === attempt.keySlot);
+		if (!provider || !key) return false;
+		this.active = {
+			plan: { providerId: attempt.providerId, model: attempt.model },
+			keySlot: attempt.keySlot,
+		};
+		return true;
+	}
+
 	snapshot(): FailoverSnapshot {
 		const now = this.now();
 		return {
@@ -194,7 +211,6 @@ export class FailoverEngine {
 			if (decision) return decision;
 		}
 
-		this.active = undefined;
 		return this.setDecision({ kind: "exhausted" });
 	}
 

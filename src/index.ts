@@ -1,6 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadAuthCatalog, type AuthCatalog } from "./auth-catalog.ts";
-import { FailoverEngine, type FailoverDecision, type FailureObservation } from "./failover-engine.ts";
+import {
+	FailoverEngine,
+	type FailoverAttempt,
+	type FailoverDecision,
+	type FailureObservation,
+} from "./failover-engine.ts";
 import { applyNextModel } from "./model-planner.ts";
 import {
 	formatStatus,
@@ -16,9 +21,7 @@ export interface FailoverExtensionOptions {
 	now?: () => number;
 }
 
-interface AttemptResponse {
-	providerId: string;
-	keySlot: "primary" | "backup";
+interface AttemptResponse extends FailoverAttempt {
 	status?: number;
 	retryAfterMs?: number;
 }
@@ -72,6 +75,13 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 		let activeContext: ExtensionContext | undefined;
 		const possiblyOwnedProviderIds = new Set<string>();
 		let compatibilityErrorReported = false;
+		let exhaustionPending = false;
+		let deferredAttempt: FailoverAttempt | undefined;
+
+		function clearPendingExhaustion(): void {
+			exhaustionPending = false;
+			deferredAttempt = undefined;
+		}
 
 		function nextProvider(current: { providerId: string; model: string }, unavailableProviderIds: readonly string[]) {
 			if (!activeContext) return undefined;
@@ -93,6 +103,7 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 		}
 
 		function rebuild(ctx: ExtensionContext): void {
+			clearPendingExhaustion();
 			activeContext = ctx;
 			catalog = readCatalog();
 			runtime = createPiRuntimeAdapter(ctx.modelRegistry);
@@ -152,11 +163,13 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 							const result = await runtime?.restoreOriginalKey(activeDecision.providerId);
 							if (result?.ok) possiblyOwnedProviderIds.delete(activeDecision.providerId);
 						}
+						clearPendingExhaustion();
 						return "applied";
 					}
 					const result = await runtime?.restoreOriginalKey(activeDecision.providerId);
 					if (result?.ok) {
 						possiblyOwnedProviderIds.delete(activeDecision.providerId);
+						clearPendingExhaustion();
 						return "applied";
 					}
 					decision = engine?.observeFailure({ kind: "provider-error" }) ?? { kind: "exhausted" };
@@ -166,6 +179,7 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 				if (runtime?.hasOwnedOverride(activeDecision.providerId)) {
 					// The backup override is already in effect from a prior turn; re-applying
 					// would only duplicate the runtime write and re-announce the switch.
+					clearPendingExhaustion();
 					return "applied";
 				}
 				possiblyOwnedProviderIds.add(activeDecision.providerId);
@@ -174,6 +188,7 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 					: await runtime?.setBackupKey(activeDecision.providerId, backupKey);
 				if (result?.ok) {
 					notifyKeySwitch(ctx, activeDecision.providerId, activeDecision.keySlot);
+					clearPendingExhaustion();
 					return "applied";
 				}
 				if (!runtime?.hasOwnedOverride(activeDecision.providerId)) {
@@ -182,8 +197,10 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 				decision = engine?.observeFailure({ kind: "unauthorized" }) ?? { kind: "exhausted" };
 			}
 			if (decision.kind === "exhausted") {
-				await restoreOwnedOverrides();
-				notifyExhausted(ctx);
+				// Pi decides whether to auto-retry only after message_end handlers finish.
+				// Keep the active credential in place until agent_settled so a built-in
+				// retry cannot fall back to a known-bad primary credential.
+				exhaustionPending = true;
 				return "exhausted";
 			}
 			return "none";
@@ -196,19 +213,24 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 		pi.on("turn_start", async (_event, ctx) => {
 			activeContext = ctx;
 			if (!engine || !ctx.model) return;
+			if (exhaustionPending) return;
 			await execute(engine.startTurn({ providerId: ctx.model.provider, model: ctx.model.id }), ctx);
 		});
 
 		pi.on("before_provider_request", (_event, ctx) => {
 			attempt = undefined;
 			const decision = engine?.currentDecision();
-			if (
-				ctx.model &&
-				decision &&
-				(decision.kind === "switch-key" || decision.kind === "switch-model") &&
-				decision.providerId === ctx.model.provider
-			) {
-				attempt = { providerId: decision.providerId, keySlot: decision.keySlot };
+			const activeAttempt = decision && (decision.kind === "switch-key" || decision.kind === "switch-model")
+				? decision
+				: exhaustionPending
+					? deferredAttempt
+					: undefined;
+			if (ctx.model && activeAttempt?.providerId === ctx.model.provider) {
+				attempt = {
+					providerId: activeAttempt.providerId,
+					model: activeAttempt.model,
+					keySlot: activeAttempt.keySlot,
+				};
 			}
 		});
 
@@ -220,7 +242,13 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 		});
 
 		pi.on("message_end", async (event, ctx) => {
-			if (event.message.role !== "assistant" || event.message.stopReason !== "error" || !attempt || !engine) return;
+			if (event.message.role !== "assistant") return;
+			if (event.message.stopReason !== "error") {
+				attempt = undefined;
+				clearPendingExhaustion();
+				return;
+			}
+			if (!attempt || !engine) return;
 			const failedAttempt = attempt;
 			attempt = undefined;
 			const errorMessage = event.message.errorMessage ?? "";
@@ -228,6 +256,14 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 				engine.observeFailure(classifyAttemptFailure(failedAttempt, errorMessage)),
 				ctx,
 			);
+			if (result === "exhausted") {
+				deferredAttempt = {
+					providerId: failedAttempt.providerId,
+					model: failedAttempt.model,
+					keySlot: failedAttempt.keySlot,
+				};
+				engine.resumeAttempt(deferredAttempt);
+			}
 			if (result !== "applied") return;
 
 			pi.sendMessage(RETRY_MESSAGE, { triggerTurn: true, deliverAs: "followUp" });
@@ -241,10 +277,18 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 			};
 		});
 
+		pi.on("agent_settled", async () => {
+			if (!exhaustionPending) return;
+			clearPendingExhaustion();
+			await restoreOwnedOverrides();
+			if (activeContext) notifyExhausted(activeContext);
+		});
+
 		pi.on("session_shutdown", async () => {
 			await restoreOwnedOverrides();
 			engine = undefined;
 			attempt = undefined;
+			clearPendingExhaustion();
 			activeContext = undefined;
 		});
 

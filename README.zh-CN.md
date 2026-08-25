@@ -65,6 +65,8 @@ pi install npm:pi-failover
 
 中间 provider 错误会被替换为隐藏的续跑消息，因此用户无需再次发送相同内容。TUI 和 RPC 模式仍会为每次实际生效的凭据或 provider 切换显示一条脱敏警告。
 
+如果所有 failover 选项已经耗尽，但 Pi 仍有内置自动重试尚未执行，扩展会保留最后一个实际使用的凭证，直到该重试结束。重试成功时继续保留该凭证；最终仍失败时，扩展才恢复其运行时 override，并只报告一次 exhausted。这样可以避免 Pi 的重试意外切回已经失败的主凭证。
+
 ## 配置说明
 
 - `pi-failover` 不会读取或写入 `keyrouter.json`。
@@ -120,5 +122,8 @@ pi install npm:pi-failover
 ```bash
 npm test
 npm run typecheck
+npm run audit
 npm pack --dry-run
 ```
+
+`npm run audit` 对官方 npm registry 检查仅用于开发的依赖树。发布包不携带任何运行时依赖。

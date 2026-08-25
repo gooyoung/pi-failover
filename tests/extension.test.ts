@@ -408,7 +408,7 @@ test("a rejected backup override continues to provider fallback without surfacin
 	assert.doesNotMatch(harness.notifications.join("\n"), new RegExp(backupSecret));
 });
 
-test("total exhaustion restores an owned override and preserves the final assistant error", async () => {
+test("total exhaustion waits for Pi retries to settle before restoring an owned override", async () => {
 	const harness = createHarness();
 	createFailoverExtension({
 		loadCatalog: () => ({
@@ -437,10 +437,86 @@ test("total exhaustion restores an owned override and preserves the final assist
 	};
 	const result = await harness.emit("message_end", { message: finalMessage });
 
-	assert.deepEqual(harness.removedProviders, ["alpha"]);
+	assert.deepEqual(harness.removedProviders, []);
+	assert.equal(harness.resolvedKeys.get("alpha"), "backup-secret");
 	assert.equal(result, undefined);
 	assert.equal(finalMessage.errorMessage, "backup rejected by provider");
 	assert.deepEqual(harness.sentMessageCalls, [retryMessageCall]);
+
+	await harness.emit("agent_settled", {});
+
+	assert.deepEqual(harness.removedProviders, ["alpha"]);
+	assert.equal(harness.resolvedKeys.get("alpha"), "alpha-primary-secret");
+});
+
+test("a Pi retry after backup exhaustion keeps using the backup until it succeeds", async () => {
+	const harness = createHarness();
+	installExtension(harness, [
+		{ provider: "alpha", type: "api_key", backupKey: "backup-secret" },
+	]);
+
+	await startSessionTurn(harness);
+	await failAttempt(harness, { status: 401, errorMessage: "primary unauthorized" });
+	await harness.emit("turn_start", { turnIndex: 1, timestamp: 2_000 });
+
+	const exhausted = await failAttempt(harness, {
+		status: 429,
+		errorMessage: "429 Throttling.ResourceExhausted",
+	});
+
+	assert.equal(exhausted.result, undefined);
+	assert.deepEqual(harness.removedProviders, []);
+	assert.equal(harness.resolvedKeys.get("alpha"), "backup-secret");
+
+	// Pi starts its built-in retry only after the failed message_end handler returns.
+	await harness.emit("turn_start", { turnIndex: 2, timestamp: 3_000 });
+	await harness.emit("before_provider_request", { payload: {} });
+	assert.equal(harness.resolvedKeys.get("alpha"), "backup-secret");
+	await harness.emit("after_provider_response", { status: 200, headers: {} });
+	await harness.emit("message_end", {
+		message: { role: "assistant", stopReason: "stop", content: [] },
+	});
+	await harness.emit("agent_settled", {});
+	await harness.runCommand("failover", "status");
+
+	assert.deepEqual(harness.removedProviders, []);
+	assert.equal(harness.resolvedKeys.get("alpha"), "backup-secret");
+	assert.match(harness.notifications.at(-1) ?? "", /backup=healthy/);
+	assert.equal(
+		harness.notifications.filter((message) => message.includes("all configured providers exhausted")).length,
+		0,
+	);
+});
+
+test("a Pi retry tracks the primary request when applying the backup failed", async () => {
+	const harness = createHarness({
+		setRuntimeKey(_providerId, key) {
+			if (key === "rejected-backup") throw new Error("backup override rejected");
+		},
+	});
+	installExtension(harness, [
+		{ provider: "alpha", type: "api_key", backupKey: "rejected-backup" },
+	]);
+
+	await startSessionTurn(harness);
+	await failAttempt(harness, {
+		status: 429,
+		errorMessage: "429 Throttling.ResourceExhausted",
+	});
+
+	assert.equal(harness.resolvedKeys.get("alpha"), "alpha-primary-secret");
+	await harness.emit("turn_start", { turnIndex: 1, timestamp: 2_000 });
+	await harness.emit("before_provider_request", { payload: {} });
+	await harness.emit("after_provider_response", { status: 200, headers: {} });
+	await harness.emit("message_end", {
+		message: { role: "assistant", stopReason: "stop", content: [] },
+	});
+	await harness.emit("agent_settled", {});
+	await harness.runCommand("failover", "status");
+
+	assert.equal(harness.resolvedKeys.get("alpha"), "alpha-primary-secret");
+	assert.match(harness.notifications.at(-1) ?? "", /primary=healthy/);
+	assert.doesNotMatch(harness.notifications.join("\n"), /rejected-backup/);
 });
 
 test("reload and shutdown restore owned overrides while the failover command stays redacted", async () => {
@@ -770,7 +846,7 @@ for (const scenario of [
 	});
 }
 
-test("401 walks primary to backup to provider without cycling and restores all overrides when exhausted", async () => {
+test("401 walks primary to backup to provider without cycling and restores after retries settle", async () => {
 	const alphaBackup = "alpha-backup-secret-for-exhaustion";
 	const betaBackup = "beta-backup-secret-for-exhaustion";
 	const harness = createHarness({
@@ -803,6 +879,10 @@ test("401 walks primary to backup to provider without cycling and restores all o
 		{ providerId: "beta", key: betaBackup },
 	]);
 	assert.deepEqual(harness.appliedModels.map((model) => model.provider), ["beta", "gamma"]);
+	assert.deepEqual(harness.removedProviders, []);
+
+	await harness.emit("agent_settled", {});
+
 	assert.deepEqual(harness.removedProviders, ["alpha", "beta"]);
 	assert.equal(harness.resolvedKeys.get("alpha"), "alpha-primary-secret");
 	assert.equal(harness.resolvedKeys.get("beta"), "beta-primary-secret");
@@ -817,6 +897,10 @@ test("401 walks primary to backup to provider without cycling and restores all o
 	assert.deepEqual(harness.sentMessageCalls, [retryMessageCall, retryMessageCall, retryMessageCall, retryMessageCall]);
 	assert.ok(harness.notificationCalls.some(({ level }) => level === "warning"));
 	assert.ok(harness.notificationCalls.some(({ level }) => level === "error"));
+	assert.equal(
+		harness.notifications.filter((message) => message.includes("all configured providers exhausted")).length,
+		1,
+	);
 	assert.doesNotMatch(
 		JSON.stringify(harness.notificationCalls),
 		new RegExp(`${alphaBackup}|${betaBackup}|alpha-primary-secret|beta-primary-secret`),
