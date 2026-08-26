@@ -1,6 +1,6 @@
 {
 	"name": "pi-failover",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"description": "Automatic API credential and provider failover for Pi coding agent.",
 	"repository": {
 		"type": "git",
