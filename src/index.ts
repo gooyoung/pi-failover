@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadAuthCatalog, type AuthCatalog } from "./auth-catalog.ts";
 import {
+	backupIndexForSlot,
 	FailoverEngine,
 	type FailoverAttempt,
 	type FailoverDecision,
@@ -120,7 +121,7 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 				? new FailoverEngine({
 					providers: catalog.providers.map((provider) => ({
 						id: provider.provider,
-						hasBackupKey: provider.backupKey !== undefined,
+						backupKeyCount: provider.backupKeys?.length ?? 0,
 					})),
 					now,
 					nextProvider: ({ current, unavailableProviderIds }) => nextProvider(current, unavailableProviderIds),
@@ -175,8 +176,10 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 					decision = engine?.observeFailure({ kind: "provider-error" }) ?? { kind: "exhausted" };
 					continue;
 				}
-				const backupKey = catalog.providers.find((provider) => provider.provider === activeDecision.providerId)?.backupKey;
-				if (runtime?.hasOwnedOverride(activeDecision.providerId)) {
+				const provider = catalog.providers.find((candidate) => candidate.provider === activeDecision.providerId);
+				const backupIndex = backupIndexForSlot(activeDecision.keySlot);
+				const backupKey = backupIndex === undefined ? undefined : provider?.backupKeys?.[backupIndex];
+				if (backupKey !== undefined && runtime?.ownsBackupKey(activeDecision.providerId, backupKey)) {
 					// The backup override is already in effect from a prior turn; re-applying
 					// would only duplicate the runtime write and re-announce the switch.
 					clearPendingExhaustion();

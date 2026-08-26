@@ -11,7 +11,7 @@ export interface FailureObservation {
 	retryAfterMs?: number;
 }
 
-export type KeySlot = "primary" | "backup";
+export type KeySlot = "primary" | "backup" | `backup-${number}`;
 
 export interface FailoverAttempt {
 	providerId: string;
@@ -51,7 +51,7 @@ export interface ProviderFallbackRequest {
 
 export interface FailoverProvider {
 	id: string;
-	hasBackupKey?: boolean;
+	backupKeyCount?: number;
 }
 
 export interface FailoverEngineOptions {
@@ -84,6 +84,17 @@ interface ActiveAttempt {
 const KEY_RATE_LIMIT_COOLDOWN_MS = 60_000;
 const PROVIDER_COOLDOWN_MS = 30_000;
 
+export function backupSlot(index: number): KeySlot {
+	return index === 0 ? "backup" : `backup-${index + 1}`;
+}
+
+export function backupIndexForSlot(slot: KeySlot): number | undefined {
+	if (slot === "primary") return undefined;
+	if (slot === "backup") return 0;
+	const ordinal = Number(slot.slice("backup-".length));
+	return Number.isInteger(ordinal) && ordinal >= 2 ? ordinal - 1 : undefined;
+}
+
 export class FailoverEngine {
 	private readonly providers: ProviderState[];
 	private readonly now: () => number;
@@ -97,8 +108,12 @@ export class FailoverEngine {
 		this.providers = options.providers.map((provider) => ({
 			id: provider.id,
 			keys: [
-				{ slot: "primary", disabled: false, cooldownUntil: 0 },
-				...(provider.hasBackupKey ? [{ slot: "backup" as const, disabled: false, cooldownUntil: 0 }] : []),
+				{ slot: "primary" as const, disabled: false, cooldownUntil: 0 },
+				...Array.from({ length: provider.backupKeyCount ?? 0 }, (_, index) => ({
+					slot: backupSlot(index),
+					disabled: false,
+					cooldownUntil: 0,
+				})),
 			],
 			cooldownUntil: 0,
 		}));

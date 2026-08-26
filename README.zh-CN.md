@@ -28,14 +28,14 @@ pi install npm:pi-failover
 
 如果设置了 `PI_CODING_AGENT_DIR`，仍然沿用 Pi 自身的 agent 目录解析规则。
 
-保留 Pi 原有的主凭证，并在需要同 provider 备用 key 的 API-key provider 上增加一个字面量、非空的 `"key-backup"` 字段：
+保留 Pi 原有的主凭证，并在需要同 provider 备用 key 的 API-key provider 上增加 `"key-backup"` 字段。该字段既可以是一个字面量、非空字符串，也可以是由字面量、非空字符串组成的非空数组：
 
 ```json
 {
   "anthropic": {
     "type": "api_key",
     "key": "primary-api-key",
-    "key-backup": "backup-api-key"
+    "key-backup": ["backup-api-key-1", "backup-api-key-2"]
   },
   "openai-codex": {
     "type": "oauth",
@@ -45,6 +45,8 @@ pi install npm:pi-failover
   }
 }
 ```
+
+现有字符串形式等价于只含一项的数组，数组中的凭证按书写顺序尝试。如果数组为空或任一元素无效，整个备用字段都会被忽略，该 provider 仍只能使用主凭证。
 
 ### 3. 验证故障切换已启用
 
@@ -58,7 +60,7 @@ pi install npm:pi-failover
 
 当当前 key 在一次用户请求中遇到已接管的故障时，`pi-failover` 会按情况执行：
 
-- 切到同一 provider 的备用 key
+- 切到同一 provider 的下一把备用 key
 - 切到下一个已配置 provider
 - 成功切换后自动重试同一次用户请求
 - 当所有可选项都耗尽时，只显示最后一次 provider 错误
@@ -70,10 +72,10 @@ pi install npm:pi-failover
 ## 配置说明
 
 - `pi-failover` 不会读取或写入 `keyrouter.json`。
-- `"key-backup"` 表示同一 provider 的第二把 key，不表示 provider 级切换。
+- `"key-backup"` 表示同一 provider 的一把或多把备用 key，不表示 provider 级切换。
 - provider 的切换顺序由 `auth.json` 顶层字段的插入顺序决定。
 - OAuth 条目可以参与 provider 级切换，但不支持 `"key-backup"`。
-- `"key-backup"` 按字面量字符串处理，不支持从环境变量或命令动态展开。
+- `"key-backup"` 中的每个值都按字面量字符串处理，不支持从环境变量或命令动态展开。
 - Pi 的 `/login` 流程可能会重写 `auth.json` 并移除未知扩展字段，因此重新登录后可能需要再次补上 `"key-backup"`。
 
 ## 故障切换规则
@@ -82,13 +84,15 @@ pi install npm:pi-failover
 
 | 故障类型 | `pi-failover` 的处理方式 |
 | --- | --- |
-| `401` / `403` | 将当前凭证在本次会话中标记为不可用，切换到备用 key 或下一个 provider，然后重试同一次请求。 |
-| `429` | 按 `Retry-After` 冷却当前凭证；如果没有该响应头，则冷却 60 秒，切换到备用 key 后重试。 |
+| `401` / `403` | 将当前凭证在本次会话中标记为不可用，切换到下一把备用 key 或下一个 provider，然后重试同一次请求。 |
+| `429` | 按 `Retry-After` 冷却当前凭证；如果没有该响应头，则冷却 60 秒，切换到下一把备用 key 后重试。 |
 | `529` 或 overloaded 响应 | 按 `Retry-After` 冷却当前 provider；如果没有该响应头，则冷却 30 秒，切换 provider 后重试。 |
 | `500`、`502`、`503`、`504`、网络错误、超时 | 将当前 provider 冷却 30 秒，切换 provider 后重试。 |
 | 其他故障 | 保持 Pi 原有的错误处理逻辑，不额外接管。 |
 
 发生 provider 切换时，`pi-failover` 会优先保留当前 model ID；如果目标 provider 没有该 model，则退回到该 provider 的第一个可用 model。扩展内部会调用 Pi 的 `setModel()`，因此新的默认 model 会持续生效；后续不会自动切回原 provider。
+
+状态和警告信息只显示脱敏后的凭证槽位：主凭证为 `primary`，第一把备用凭证为 `backup`，后续依次为 `backup-2`、`backup-3`……
 
 ## 命令
 
@@ -106,7 +110,7 @@ pi install npm:pi-failover
 
 ## 迁移说明
 
-如果从 `~/.pi/keyrouter.json` 迁移，需要把每个 provider 的主凭证搬到 Pi 的 `auth.json` 中，再把同 provider 的第二把 key 写入 `"key-backup"`。如需控制 provider 切换顺序，可直接调整 `auth.json` 顶层条目的顺序。
+如果从 `~/.pi/keyrouter.json` 迁移，需要把每个 provider 的主凭证搬到 Pi 的 `auth.json` 中，再把一把备用 key 字符串或按顺序排列的备用 key 数组写入 `"key-backup"`。如需控制 provider 切换顺序，可直接调整 `auth.json` 顶层条目的顺序。
 
 当前没有双读迁移模式，`pi-failover` 只读取 `auth.json`。
 

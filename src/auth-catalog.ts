@@ -5,7 +5,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 export interface AuthProviderEntry {
 	provider: string;
 	type: "api_key" | "oauth";
-	backupKey?: string;
+	backupKeys?: string[];
 }
 
 export interface AuthCatalogDiagnostic {
@@ -49,8 +49,9 @@ export function loadAuthCatalog(options: LoadAuthCatalogOptions = {}): AuthCatal
 		if (isApiKeyCredential(credential)) {
 			const entry: AuthProviderEntry = { provider, type: "api_key" };
 			const backup = credential["key-backup"];
-			if (isLiteralBackupKey(backup)) {
-				entry.backupKey = backup;
+			const backupKeys = normalizeBackupKeys(backup);
+			if (backupKeys) {
+				entry.backupKeys = backupKeys;
 			} else if (backup !== undefined) {
 				diagnostics.push({ provider, field: "key-backup", message: "Ignored invalid key-backup" });
 			}
@@ -64,6 +65,12 @@ export function loadAuthCatalog(options: LoadAuthCatalogOptions = {}): AuthCatal
 	}
 
 	return { enabled: true, providers, diagnostics };
+}
+
+function normalizeBackupKeys(value: unknown): string[] | undefined {
+	if (isLiteralBackupKey(value)) return [value];
+	if (!Array.isArray(value) || value.length === 0) return undefined;
+	return value.every(isLiteralBackupKey) ? value : undefined;
 }
 
 function isLiteralBackupKey(value: unknown): value is string {

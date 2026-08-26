@@ -15,6 +15,7 @@ export type RuntimeOverrideResult =
 export interface PiRuntimeAdapter {
 	readonly supported: boolean;
 	hasOwnedOverride(providerId: string): boolean;
+	ownsBackupKey(providerId: string, backupKey: string): boolean;
 	setBackupKey(providerId: string, backupKey: string): Promise<RuntimeOverrideResult>;
 	restoreOriginalKey(providerId: string): Promise<RuntimeOverrideResult>;
 }
@@ -72,6 +73,7 @@ export function createPiRuntimeAdapter(registry: PiRuntimeRegistry): PiRuntimeAd
 		api: RuntimeApi,
 		providerId: string,
 		owned: OwnedOverride,
+		previousOwned: OwnedOverride | undefined,
 		byProvider: Map<string, OwnedOverride>,
 	): Promise<void> {
 		let state: { key: string | undefined; status: PiAuthStatus };
@@ -81,6 +83,10 @@ export function createPiRuntimeAdapter(registry: PiRuntimeRegistry): PiRuntimeAd
 			return;
 		}
 
+		if (previousOwned && state.status.source === "runtime" && state.key === previousOwned.ownedKey) {
+			byProvider.set(providerId, previousOwned);
+			return;
+		}
 		if (originalStateConfirmed(state, owned)) {
 			byProvider.delete(providerId);
 			return;
@@ -111,6 +117,10 @@ export function createPiRuntimeAdapter(registry: PiRuntimeRegistry): PiRuntimeAd
 		hasOwnedOverride(providerId) {
 			return runtime !== undefined && (ownershipStore().get(runtime)?.has(providerId) ?? false);
 		},
+		ownsBackupKey(providerId, backupKey) {
+			if (!runtime) return false;
+			return ownershipStore().get(runtime)?.get(providerId)?.ownedKey === backupKey;
+		},
 
 		async setBackupKey(providerId, backupKey) {
 			if (!runtime) return { ok: false, reason: "unsupported" };
@@ -137,7 +147,7 @@ export function createPiRuntimeAdapter(registry: PiRuntimeRegistry): PiRuntimeAd
 				try {
 					await runtime.setRuntimeApiKey(providerId, backupKey);
 				} catch {
-					await reconcileRejectedSet(runtime, providerId, owned, byProvider);
+					await reconcileRejectedSet(runtime, providerId, owned, existing, byProvider);
 					return { ok: false, reason: "operation_failed" };
 				}
 				return { ok: true, action: "set" };

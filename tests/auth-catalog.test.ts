@@ -33,7 +33,7 @@ describe("loadAuthCatalog", () => {
 
 		assert.equal(catalog.enabled, true);
 		assert.deepEqual(catalog.providers, [
-			{ provider: "anthropic", type: "api_key", backupKey: "backup-anthropic" },
+			{ provider: "anthropic", type: "api_key", backupKeys: ["backup-anthropic"] },
 			{ provider: "openai-codex", type: "oauth" },
 			{ provider: "google", type: "api_key" },
 		]);
@@ -41,6 +41,28 @@ describe("loadAuthCatalog", () => {
 			JSON.stringify(catalog),
 			/primary-anthropic|primary-google|oauth-access|oauth-refresh/,
 		);
+	});
+
+	test("normalizes string and array backups while preserving array order", () => {
+		writeAuthFile({
+			legacy: { type: "api_key", key: "primary-legacy", "key-backup": "legacy-backup" },
+			ordered: {
+				type: "api_key",
+				key: "primary-ordered",
+				"key-backup": ["ordered-backup-1", "ordered-backup-2", "ordered-backup-3"],
+			},
+		});
+
+		const catalog = loadAuthCatalog({ authPath });
+
+		assert.deepEqual(catalog.providers, [
+			{ provider: "legacy", type: "api_key", backupKeys: ["legacy-backup"] },
+			{
+				provider: "ordered",
+				type: "api_key",
+				backupKeys: ["ordered-backup-1", "ordered-backup-2", "ordered-backup-3"],
+			},
+		]);
 	});
 
 	test("includes api-key credentials that use a string-valued env map", () => {
@@ -93,6 +115,29 @@ describe("loadAuthCatalog", () => {
 		assert.equal(catalog.diagnostics.length, 5);
 		assert.ok(catalog.diagnostics.every((diagnostic) => diagnostic.field === "key-backup"));
 		assert.doesNotMatch(JSON.stringify(catalog.diagnostics), /primary-empty|primary-numbered/);
+	});
+
+	test("rejects an empty or partially invalid backup array as a whole without exposing values", () => {
+		const hidden = "valid-looking-secret-must-not-escape";
+		writeAuthFile({
+			empty: { type: "api_key", key: "primary-empty", "key-backup": [] },
+			partlyEmpty: { type: "api_key", key: "primary-empty-item", "key-backup": [hidden, ""] },
+			partlySymbolic: { type: "api_key", key: "primary-symbolic", "key-backup": [hidden, "$BACKUP_KEY"] },
+			partlyCommand: { type: "api_key", key: "primary-command", "key-backup": [hidden, "!secret-command"] },
+			partlyTyped: { type: "api_key", key: "primary-typed", "key-backup": [hidden, 42] },
+		});
+
+		const catalog = loadAuthCatalog({ authPath });
+
+		assert.deepEqual(catalog.providers, [
+			{ provider: "empty", type: "api_key" },
+			{ provider: "partlyEmpty", type: "api_key" },
+			{ provider: "partlySymbolic", type: "api_key" },
+			{ provider: "partlyCommand", type: "api_key" },
+			{ provider: "partlyTyped", type: "api_key" },
+		]);
+		assert.equal(catalog.diagnostics.length, 5);
+		assert.doesNotMatch(JSON.stringify(catalog.diagnostics), new RegExp(hidden));
 	});
 
 	test("returns a disabled catalog for malformed JSON without exposing its contents", () => {

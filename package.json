@@ -24,14 +24,19 @@
 		"audit": "npm audit --registry=https://registry.npmjs.org"
 	},
 	"keywords": [
-		"pi-package",
+		"pi",
 		"pi-coding-agent",
-		"extension",
-		"api-key-failover",
-		"credential-failover",
+		"pi-extension",
+		"pi-packages",
+		"pi-failover",
+		"failover",
+		"llm-failover",
+		"key-failover",
 		"provider-failover",
 		"rate-limit",
-		"fallback"
+		"fallback",
+		"llm-fallback",
+		"key-router"
 	],
 	"pi": {
 		"extensions": [

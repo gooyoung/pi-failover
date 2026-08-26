@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
+	backupIndexForSlot,
+	backupSlot,
 	FailoverEngine,
 	type FailoverDecision,
 	type FailureObservation,
+	type KeySlot,
 } from "../src/failover-engine.ts";
 
 const primarySecret = "primary-secret-must-never-escape";
@@ -20,13 +23,13 @@ function createClock(initial = 1_000): { now: () => number; advance: (millisecon
 }
 
 function createEngine(options: {
-	providers?: Array<{ id: string; hasBackupKey?: boolean }>;
+	providers?: Array<{ id: string; backupKeyCount?: number }>;
 	plans?: Array<{ providerId: string; model: string }>;
 	clock?: ReturnType<typeof createClock>;
 } = {}): FailoverEngine {
 	const plans = [...(options.plans ?? [])];
 	return new FailoverEngine({
-		providers: options.providers ?? [{ id: "alpha", hasBackupKey: true }],
+		providers: options.providers ?? [{ id: "alpha", backupKeyCount: 1 }],
 		now: options.clock?.now ?? (() => 1_000),
 		nextProvider: () => plans.shift(),
 	});
@@ -34,7 +37,7 @@ function createEngine(options: {
 
 function assertAttempt(
 	decision: FailoverDecision,
-	expected: { providerId: string; model: string; keySlot: "primary" | "backup"; kind?: "switch-key" | "switch-model" },
+	expected: { providerId: string; model: string; keySlot: KeySlot; kind?: "switch-key" | "switch-model" },
 ): void {
 	assert.deepEqual(decision, {
 		kind: expected.kind ?? "switch-key",
@@ -124,7 +127,7 @@ describe("FailoverEngine", () => {
 		const clock = createClock();
 		const engine = createEngine({
 			clock,
-			providers: [{ id: "alpha", hasBackupKey: true }, { id: "beta", hasBackupKey: true }],
+			providers: [{ id: "alpha", backupKeyCount: 1 }, { id: "beta", backupKeyCount: 1 }],
 			plans: [{ providerId: "beta", model: "beta-model" }],
 		});
 
@@ -203,7 +206,7 @@ describe("FailoverEngine", () => {
 
 	test("does not retry a key or provider more than once during a turn", () => {
 		const engine = createEngine({
-			providers: [{ id: "alpha", hasBackupKey: true }, { id: "beta", hasBackupKey: true }],
+			providers: [{ id: "alpha", backupKeyCount: 1 }, { id: "beta", backupKeyCount: 1 }],
 			plans: [
 				{ providerId: "alpha", model: "alpha-again" },
 				{ providerId: "beta", model: "beta-model" },
@@ -234,7 +237,7 @@ describe("FailoverEngine", () => {
 		const clock = createClock();
 		const engine = createEngine({
 			clock,
-			providers: [{ id: "alpha", hasBackupKey: true }, { id: "beta", hasBackupKey: true }],
+			providers: [{ id: "alpha", backupKeyCount: 1 }, { id: "beta", backupKeyCount: 1 }],
 			plans: [
 				{ providerId: "alpha", model: "alpha-again" },
 				{ providerId: "beta", model: "beta-model" },
@@ -256,7 +259,7 @@ describe("FailoverEngine", () => {
 		const clock = createClock();
 		const engine = createEngine({
 			clock,
-			providers: [{ id: "alpha", hasBackupKey: true }, { id: "beta" }],
+			providers: [{ id: "alpha", backupKeyCount: 1 }, { id: "beta" }],
 			plans: [
 				{ providerId: "beta", model: "beta-model" },
 				{ providerId: "beta", model: "beta-model" },
@@ -283,5 +286,63 @@ describe("FailoverEngine", () => {
 			model: "alpha-model",
 			keySlot: "primary",
 		});
+	});
+
+	test("rotates through every backup in order before provider fallback", () => {
+		const engine = createEngine({
+			providers: [{ id: "alpha", backupKeyCount: 3 }, { id: "beta" }],
+			plans: [{ providerId: "beta", model: "beta-model" }],
+		});
+
+		assertAttempt(engine.startTurn({ providerId: "alpha", model: "alpha-model" }), {
+			providerId: "alpha",
+			model: "alpha-model",
+			keySlot: "primary",
+		});
+		for (const keySlot of ["backup", "backup-2", "backup-3"] as const) {
+			assertAttempt(engine.observeFailure({ status: 401 }), {
+				providerId: "alpha",
+				model: "alpha-model",
+				keySlot,
+			});
+		}
+		assertAttempt(engine.observeFailure({ status: 401 }), {
+			kind: "switch-model",
+			providerId: "beta",
+			model: "beta-model",
+			keySlot: "primary",
+		});
+		assert.deepEqual(engine.snapshot().providers[0]?.keys, [
+			{ slot: "primary", status: "disabled" },
+			{ slot: "backup", status: "disabled" },
+			{ slot: "backup-2", status: "disabled" },
+			{ slot: "backup-3", status: "disabled" },
+		]);
+	});
+
+	test("tracks cooldown independently for each ordered backup", () => {
+		const engine = createEngine({ providers: [{ id: "alpha", backupKeyCount: 2 }] });
+		engine.startTurn({ providerId: "alpha", model: "alpha-model" });
+		engine.observeFailure({ status: 429, retryAfterMs: 5_000 });
+		assertAttempt(engine.observeFailure({ status: 429, retryAfterMs: 10_000 }), {
+			providerId: "alpha",
+			model: "alpha-model",
+			keySlot: "backup-2",
+		});
+		assert.deepEqual(engine.snapshot().providers[0]?.keys, [
+			{ slot: "primary", status: "cooling", cooldownUntil: 6_000 },
+			{ slot: "backup", status: "cooling", cooldownUntil: 11_000 },
+			{ slot: "backup-2", status: "healthy" },
+		]);
+	});
+
+	test("maps backup slots to stable zero-based catalog indexes", () => {
+		assert.equal(backupIndexForSlot("primary"), undefined);
+		assert.equal(backupIndexForSlot("backup"), 0);
+		assert.equal(backupIndexForSlot("backup-2"), 1);
+		assert.equal(backupIndexForSlot("backup-3"), 2);
+		assert.equal(backupSlot(0), "backup");
+		assert.equal(backupSlot(1), "backup-2");
+		assert.equal(backupSlot(2), "backup-3");
 	});
 });

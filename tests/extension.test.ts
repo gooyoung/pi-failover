@@ -150,7 +150,7 @@ type ExtensionHarness = ReturnType<typeof createHarness>;
 function installExtension(
 	harness: ExtensionHarness,
 	providers: Array<
-		| { provider: string; type: "api_key"; backupKey?: string }
+		| { provider: string; type: "api_key"; backupKeys?: string[] }
 		| { provider: string; type: "oauth" }
 	>,
 	options: { now?: () => number } = {},
@@ -208,7 +208,7 @@ test("a 401 response rotates to the provider backup and hides the intermediate e
 	createFailoverExtension({
 		loadCatalog: () => ({
 			enabled: true,
-			providers: [{ provider: "alpha", type: "api_key", backupKey: "backup-secret" }],
+			providers: [{ provider: "alpha", type: "api_key", backupKeys: ["backup-secret"] }],
 			diagnostics: [],
 		}),
 		now: () => 1_000,
@@ -235,7 +235,7 @@ test("a 401 response rotates to the provider backup and hides the intermediate e
 test("a 403 backup switch hides the intermediate error and queues exactly one continuation", async () => {
 	const harness = createHarness();
 	installExtension(harness, [
-		{ provider: "alpha", type: "api_key", backupKey: "backup-secret" },
+		{ provider: "alpha", type: "api_key", backupKeys: ["backup-secret"] },
 	]);
 
 	await startSessionTurn(harness);
@@ -262,7 +262,7 @@ test("the follow-up retry turn does not re-announce an already-applied backup sw
 	createFailoverExtension({
 		loadCatalog: () => ({
 			enabled: true,
-			providers: [{ provider: "alpha", type: "api_key", backupKey: "backup-secret" }],
+			providers: [{ provider: "alpha", type: "api_key", backupKeys: ["backup-secret"] }],
 			diagnostics: [],
 		}),
 		now: () => 1_000,
@@ -294,6 +294,70 @@ test("the follow-up retry turn does not re-announce an already-applied backup sw
 	);
 });
 
+test("credential failures apply ordered backups once before provider fallback", async () => {
+	const backups = ["ordered-secret-one", "ordered-secret-two", "ordered-secret-three"];
+	const harness = createHarness({
+		models: [
+			{ provider: "alpha", id: "shared" },
+			{ provider: "beta", id: "shared" },
+		],
+	});
+	installExtension(harness, [
+		{ provider: "alpha", type: "api_key", backupKeys: backups },
+		{ provider: "beta", type: "oauth" },
+	]);
+
+	await startSessionTurn(harness);
+	for (const errorMessage of ["primary unauthorized", "backup one unauthorized", "backup two unauthorized"]) {
+		await failAttempt(harness, { status: 401, errorMessage });
+	}
+	assert.deepEqual(harness.setKeyCalls, backups.map((key) => ({ providerId: "alpha", key })));
+
+	await failAttempt(harness, { status: 401, errorMessage: "backup three unauthorized" });
+	assert.equal(harness.ctx.model?.provider, "beta");
+	assert.deepEqual(harness.appliedModels, [{ provider: "beta", id: "shared" }]);
+	assert.doesNotMatch(JSON.stringify(harness.notificationCalls), new RegExp(backups.join("|")));
+});
+
+test("a retry turn does not rewrite the currently selected numbered backup", async () => {
+	const harness = createHarness();
+	installExtension(harness, [
+		{ provider: "alpha", type: "api_key", backupKeys: ["backup-one", "backup-two"] },
+	]);
+
+	await startSessionTurn(harness);
+	await failAttempt(harness, { status: 401, errorMessage: "primary unauthorized" });
+	await failAttempt(harness, { status: 401, errorMessage: "first backup unauthorized" });
+	assert.deepEqual(harness.setKeys, ["backup-one", "backup-two"]);
+
+	await harness.emit("turn_start", { turnIndex: 1, timestamp: 1_001 });
+	assert.deepEqual(harness.setKeys, ["backup-one", "backup-two"]);
+	assert.equal(
+		harness.notifications.filter((message) => message === "pi-failover: alpha switched to backup-2 credential").length,
+		1,
+	);
+});
+
+test("a rejected backup write advances to the next configured backup", async () => {
+	const rejected = "rejected-backup-secret";
+	const accepted = "accepted-backup-secret";
+	const harness = createHarness({
+		setRuntimeKey(_providerId, key) {
+			if (key === rejected) throw new Error(`setter rejected ${key}`);
+		},
+	});
+	installExtension(harness, [
+		{ provider: "alpha", type: "api_key", backupKeys: [rejected, accepted] },
+	]);
+
+	await startSessionTurn(harness);
+	await failAttempt(harness, { status: 401, errorMessage: "primary unauthorized" });
+
+	assert.deepEqual(harness.setKeys, [rejected, accepted]);
+	assert.equal(harness.resolvedKeys.get("alpha"), accepted);
+	assert.doesNotMatch(JSON.stringify(harness.notificationCalls), new RegExp(`${rejected}|${accepted}`));
+});
+
 test("overloaded text on an ordinary 429 switches provider through Pi's model API", async () => {
 	const harness = createHarness({
 		models: [
@@ -305,7 +369,7 @@ test("overloaded text on an ordinary 429 switches provider through Pi's model AP
 		loadCatalog: () => ({
 			enabled: true,
 			providers: [
-				{ provider: "alpha", type: "api_key", backupKey: "alpha-backup-secret" },
+				{ provider: "alpha", type: "api_key", backupKeys: ["alpha-backup-secret"] },
 				{ provider: "beta", type: "oauth" },
 			],
 			diagnostics: [],
@@ -341,7 +405,7 @@ test("a new provider attempt clears stale status before classifying a response-l
 		loadCatalog: () => ({
 			enabled: true,
 			providers: [
-				{ provider: "alpha", type: "api_key", backupKey: "alpha-backup-secret" },
+				{ provider: "alpha", type: "api_key", backupKeys: ["alpha-backup-secret"] },
 				{ provider: "beta", type: "oauth" },
 			],
 			diagnostics: [],
@@ -382,7 +446,7 @@ test("a rejected backup override continues to provider fallback without surfacin
 		loadCatalog: () => ({
 			enabled: true,
 			providers: [
-				{ provider: "alpha", type: "api_key", backupKey: backupSecret },
+				{ provider: "alpha", type: "api_key", backupKeys: [backupSecret] },
 				{ provider: "beta", type: "oauth" },
 			],
 			diagnostics: [],
@@ -413,7 +477,7 @@ test("total exhaustion waits for Pi retries to settle before restoring an owned 
 	createFailoverExtension({
 		loadCatalog: () => ({
 			enabled: true,
-			providers: [{ provider: "alpha", type: "api_key", backupKey: "backup-secret" }],
+			providers: [{ provider: "alpha", type: "api_key", backupKeys: ["backup-secret"] }],
 			diagnostics: [],
 		}),
 		now: () => 1_000,
@@ -452,7 +516,7 @@ test("total exhaustion waits for Pi retries to settle before restoring an owned 
 test("a Pi retry after backup exhaustion keeps using the backup until it succeeds", async () => {
 	const harness = createHarness();
 	installExtension(harness, [
-		{ provider: "alpha", type: "api_key", backupKey: "backup-secret" },
+		{ provider: "alpha", type: "api_key", backupKeys: ["backup-secret"] },
 	]);
 
 	await startSessionTurn(harness);
@@ -495,7 +559,7 @@ test("a Pi retry tracks the primary request when applying the backup failed", as
 		},
 	});
 	installExtension(harness, [
-		{ provider: "alpha", type: "api_key", backupKey: "rejected-backup" },
+		{ provider: "alpha", type: "api_key", backupKeys: ["rejected-backup"] },
 	]);
 
 	await startSessionTurn(harness);
@@ -529,7 +593,7 @@ test("reload and shutdown restore owned overrides while the failover command sta
 			if (catalogLoads === 2) assert.deepEqual(harness.removedProviders, ["alpha"]);
 			return {
 				enabled: true,
-				providers: [{ provider: "alpha", type: "api_key", backupKey: backupSecret }],
+				providers: [{ provider: "alpha", type: "api_key", backupKeys: [backupSecret] }],
 				diagnostics: [],
 			};
 		},
@@ -568,7 +632,7 @@ test("Retry-After metadata expires the primary cooldown and restores the owned b
 	createFailoverExtension({
 		loadCatalog: () => ({
 			enabled: true,
-			providers: [{ provider: "alpha", type: "api_key", backupKey: "backup-secret" }],
+			providers: [{ provider: "alpha", type: "api_key", backupKeys: ["backup-secret"] }],
 			diagnostics: [],
 		}),
 		now: () => time,
@@ -595,7 +659,7 @@ test("an exact successful response takes precedence over conflicting assistant e
 	createFailoverExtension({
 		loadCatalog: () => ({
 			enabled: true,
-			providers: [{ provider: "alpha", type: "api_key", backupKey: "backup-secret" }],
+			providers: [{ provider: "alpha", type: "api_key", backupKeys: ["backup-secret"] }],
 			diagnostics: [],
 		}),
 	})(harness.pi);
@@ -623,7 +687,7 @@ test("json and print modes make no UI calls while still queuing a hidden continu
 		createFailoverExtension({
 			loadCatalog: () => ({
 				enabled: true,
-				providers: [{ provider: "alpha", type: "api_key", backupKey: "backup-secret" }],
+				providers: [{ provider: "alpha", type: "api_key", backupKeys: ["backup-secret"] }],
 				diagnostics: [],
 			}),
 		})(harness.pi);
@@ -730,7 +794,7 @@ test("shutdown retries failed reload cleanup after the new catalog removes the o
 			return catalogLoads === 1
 				? {
 					enabled: true,
-					providers: [{ provider: "alpha", type: "api_key", backupKey: "alpha-backup-secret" }],
+					providers: [{ provider: "alpha", type: "api_key", backupKeys: ["alpha-backup-secret"] }],
 					diagnostics: [],
 				}
 				: {
@@ -775,7 +839,7 @@ for (const { mode, expectsNotifications } of [
 			],
 		});
 		installExtension(harness, [
-			{ provider: "alpha", type: "api_key", backupKey: alphaBackup },
+			{ provider: "alpha", type: "api_key", backupKeys: [alphaBackup] },
 			{ provider: "beta", type: "oauth" },
 		]);
 
@@ -832,7 +896,7 @@ for (const scenario of [
 			],
 		});
 		installExtension(harness, [
-			{ provider: "alpha", type: "api_key", backupKey },
+			{ provider: "alpha", type: "api_key", backupKeys: [backupKey] },
 			{ provider: "beta", type: "oauth" },
 		]);
 
@@ -857,8 +921,8 @@ test("401 walks primary to backup to provider without cycling and restores after
 		],
 	});
 	installExtension(harness, [
-		{ provider: "alpha", type: "api_key", backupKey: alphaBackup },
-		{ provider: "beta", type: "api_key", backupKey: betaBackup },
+		{ provider: "alpha", type: "api_key", backupKeys: [alphaBackup] },
+		{ provider: "beta", type: "api_key", backupKeys: [betaBackup] },
 		{ provider: "gamma", type: "oauth" },
 	]);
 
@@ -946,8 +1010,8 @@ test("reload and shutdown restore the owned backup and keep status and warning n
 		],
 	});
 	installExtension(harness, [
-		{ provider: "alpha", type: "api_key", backupKey: alphaBackup },
-		{ provider: "beta", type: "api_key", backupKey: betaBackup },
+		{ provider: "alpha", type: "api_key", backupKeys: [alphaBackup] },
+		{ provider: "beta", type: "api_key", backupKeys: [betaBackup] },
 	]);
 
 	await startSessionTurn(harness);

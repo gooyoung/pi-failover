@@ -73,6 +73,44 @@ describe("createPiRuntimeAdapter", () => {
 		assert.equal(harness.resolvedKeys.get("alpha"), "preexisting-runtime-key");
 	});
 
+	test("recognizes only the currently owned backup while preserving the original across replacements", async () => {
+		const harness = createRuntimeHarness("stored", "stored-primary");
+		const adapter = createPiRuntimeAdapter(harness.registry);
+
+		assert.equal(adapter.ownsBackupKey("alpha", "backup-one"), false);
+		await adapter.setBackupKey("alpha", "backup-one");
+		assert.equal(adapter.ownsBackupKey("alpha", "backup-one"), true);
+		assert.equal(adapter.ownsBackupKey("alpha", "backup-two"), false);
+
+		await adapter.setBackupKey("alpha", "backup-two");
+		assert.equal(adapter.ownsBackupKey("alpha", "backup-one"), false);
+		assert.equal(adapter.ownsBackupKey("alpha", "backup-two"), true);
+
+		assert.deepEqual(await adapter.restoreOriginalKey("alpha"), { ok: true, action: "removed" });
+		assert.equal(harness.resolvedKeys.get("alpha"), "stored-primary");
+	});
+
+	test("retains the previous owned backup when a replacement rejects before activation", async () => {
+		const harness = createRuntimeHarness("stored", "stored-primary");
+		const adapter = createPiRuntimeAdapter(harness.registry);
+		await adapter.setBackupKey("alpha", "backup-one");
+		const originalSetter = harness.registry.runtime.setRuntimeApiKey;
+		harness.registry.runtime.setRuntimeApiKey = async (providerId, key) => {
+			if (key === "backup-two") throw new Error("replacement rejected");
+			await originalSetter(providerId, key);
+		};
+
+		assert.deepEqual(await adapter.setBackupKey("alpha", "backup-two"), {
+			ok: false,
+			reason: "operation_failed",
+		});
+		assert.equal(adapter.ownsBackupKey("alpha", "backup-one"), true);
+		assert.equal(harness.resolvedKeys.get("alpha"), "backup-one");
+
+		assert.deepEqual(await adapter.restoreOriginalKey("alpha"), { ok: true, action: "removed" });
+		assert.equal(harness.resolvedKeys.get("alpha"), "stored-primary");
+	});
+
 	test("preserves ownership across separately evaluated extension modules", async () => {
 		const harness = createRuntimeHarness("stored", "stored-primary");
 		const firstModule = await import(
