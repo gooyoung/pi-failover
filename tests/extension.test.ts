@@ -541,7 +541,7 @@ test("a Pi retry after backup exhaustion keeps using the backup until it succeed
 		message: { role: "assistant", stopReason: "stop", content: [] },
 	});
 	await harness.emit("agent_settled", {});
-	await harness.runCommand("failover", "status");
+	await harness.runCommand("failover-status", "");
 
 	assert.deepEqual(harness.removedProviders, []);
 	assert.equal(harness.resolvedKeys.get("alpha"), "backup-secret");
@@ -576,14 +576,27 @@ test("a Pi retry tracks the primary request when applying the backup failed", as
 		message: { role: "assistant", stopReason: "stop", content: [] },
 	});
 	await harness.emit("agent_settled", {});
-	await harness.runCommand("failover", "status");
+	await harness.runCommand("failover-status", "");
 
 	assert.equal(harness.resolvedKeys.get("alpha"), "alpha-primary-secret");
 	assert.match(harness.notifications.at(-1) ?? "", /primary=healthy/);
 	assert.doesNotMatch(harness.notifications.join("\n"), /rejected-backup/);
 });
 
-test("reload and shutdown restore owned overrides while the failover command stays redacted", async () => {
+test("registers discoverable status and reload commands and status responds without arguments", async () => {
+	const harness = createHarness();
+	installExtension(harness, [
+		{ provider: "alpha", type: "api_key", backupKeys: ["backup-secret"] },
+	]);
+
+	await harness.emit("session_start", { reason: "startup" });
+	await harness.runCommand("failover-status", "");
+
+	assert.deepEqual([...harness.commands.keys()], ["failover-status", "failover-reload"]);
+	assert.match(harness.notifications.at(-1) ?? "", /pi-failover: active/);
+});
+
+test("reload and shutdown restore owned overrides while the failover commands stay redacted", async () => {
 	const backupSecret = "backup-secret-must-stay-out-of-status";
 	const harness = createHarness();
 	let catalogLoads = 0;
@@ -608,10 +621,10 @@ test("reload and shutdown restore owned overrides while the failover command sta
 		message: { role: "assistant", stopReason: "error", errorMessage: "unauthorized", content: [] },
 	});
 
-	await harness.runCommand("failover", "reload");
-	await harness.runCommand("failover", "status");
+	await harness.runCommand("failover-reload", "");
+	await harness.runCommand("failover-status", "");
 	assert.equal(catalogLoads, 2);
-	assert.deepEqual([...harness.commands.keys()], ["failover"]);
+	assert.deepEqual([...harness.commands.keys()], ["failover-status", "failover-reload"]);
 	assert.match(harness.notifications.join("\n"), /alpha|failover/i);
 	assert.doesNotMatch(harness.notifications.join("\n"), new RegExp(backupSecret));
 
@@ -693,7 +706,7 @@ test("json and print modes make no UI calls while still queuing a hidden continu
 		})(harness.pi);
 
 		await harness.emit("session_start", { reason: "startup" });
-		await harness.runCommand("failover", "status");
+		await harness.runCommand("failover-status", "");
 		await harness.emit("turn_start", { turnIndex: 0, timestamp: 1_000 });
 		await harness.emit("before_provider_request", { payload: {} });
 		await harness.emit("after_provider_response", { status: 401, headers: {} });
@@ -813,7 +826,7 @@ test("shutdown retries failed reload cleanup after the new catalog removes the o
 		message: { role: "assistant", stopReason: "error", errorMessage: "unauthorized", content: [] },
 	});
 
-	await harness.runCommand("failover", "reload");
+	await harness.runCommand("failover-reload", "");
 	assert.equal(catalogLoads, 2);
 	assert.deepEqual(harness.removedProviders, ["alpha"]);
 
@@ -1016,8 +1029,8 @@ test("reload and shutdown restore the owned backup and keep status and warning n
 
 	await startSessionTurn(harness);
 	await failAttempt(harness, { status: 401, errorMessage: "alpha unauthorized" });
-	await harness.runCommand("failover", "status");
-	await harness.runCommand("failover", "reload");
+	await harness.runCommand("failover-status", "");
+	await harness.runCommand("failover-reload", "");
 	assert.deepEqual(harness.removedProviders, ["alpha"]);
 
 	await startSessionTurn(harness, 1);

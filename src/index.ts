@@ -295,21 +295,19 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 			activeContext = undefined;
 		});
 
-		pi.registerCommand("failover", {
-			description: "show failover status or reload auth.json",
-			handler: async (args, ctx) => {
-				const subcommand = args.trim() || "status";
-				if (subcommand === "status") {
-					notify(ctx, formatStatus(catalog, engine?.snapshot()), "info");
-					return;
-				}
-				if (subcommand === "reload") {
-					await restoreOwnedOverrides();
-					rebuild(ctx);
-					notify(ctx, catalog.enabled ? "pi-failover: reloaded auth.json" : "pi-failover: auth.json reload disabled failover", catalog.enabled ? "info" : "warning");
-					return;
-				}
-				notify(ctx, "pi-failover: usage: /failover status|reload", "warning");
+		pi.registerCommand("failover-status", {
+			description: "show redacted failover status",
+			handler: async (_args, ctx) => {
+				notify(ctx, formatStatus(catalog, engine?.snapshot()), "info");
+			},
+		});
+
+		pi.registerCommand("failover-reload", {
+			description: "reload failover configuration from auth.json",
+			handler: async (_args, ctx) => {
+				await restoreOwnedOverrides();
+				rebuild(ctx);
+				notify(ctx, catalog.enabled ? "pi-failover: reloaded auth.json" : "pi-failover: auth.json reload disabled failover", catalog.enabled ? "info" : "warning");
 			},
 		});
 	};
