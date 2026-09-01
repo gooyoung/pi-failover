@@ -67,6 +67,12 @@ pi install npm:pi-failover
 
 中间 provider 错误会被替换为隐藏的续跑消息，因此用户无需再次发送相同内容。TUI 和 RPC 模式仍会为每次实际生效的凭据或 provider 切换显示一条脱敏警告。
 
+以下是切换到备用凭证及切换 provider 后显示的警告示例：
+
+![切换到备用凭证的警告](https://raw.githubusercontent.com/gooyoung/pi-failover/main/docs/images/failover-backup-credential-switch.png)
+
+![切换 provider 的警告](https://raw.githubusercontent.com/gooyoung/pi-failover/main/docs/images/failover-provider-switches.png)
+
 如果所有 failover 选项已经耗尽，但 Pi 仍有内置自动重试尚未执行，扩展会保留最后一个实际使用的凭证，直到该重试结束。重试成功时继续保留该凭证；最终仍失败时，扩展才恢复其运行时 override，并只报告一次 exhausted。这样可以避免 Pi 的重试意外切回已经失败的主凭证。
 
 ## 配置说明
