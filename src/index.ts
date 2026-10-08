@@ -1,7 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadAuthCatalog, type AuthCatalog } from "./auth-catalog.ts";
+import { loadAuthCatalog, withRuntimeProviders, type AuthCatalog } from "./auth-catalog.ts";
 import {
 	backupIndexForSlot,
+	backupSlot,
 	FailoverEngine,
 	type FailoverAttempt,
 	type FailoverDecision,
@@ -73,6 +74,7 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 		let engine: FailoverEngine | undefined;
 		let runtime: PiRuntimeAdapter | undefined;
 		let attempt: AttemptResponse | undefined;
+		let response: Pick<AttemptResponse, "status" | "retryAfterMs"> | undefined;
 		let activeContext: ExtensionContext | undefined;
 		const possiblyOwnedProviderIds = new Set<string>();
 		let compatibilityErrorReported = false;
@@ -96,7 +98,7 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 			for (const providerId of candidates) {
 				if (providerId === current.providerId || unavailable.has(providerId)) continue;
 				if (!activeContext.modelRegistry.getProviderAuthStatus(providerId).configured) continue;
-				const providerModels = models.filter((model) => model.provider === providerId);
+				const providerModels = models.filter((model) => model.provider === providerId && model.api !== "pi-virtual");
 				const model = providerModels.find((candidate) => candidate.id === current.model) ?? providerModels[0];
 				if (model) return { providerId, model: model.id };
 			}
@@ -106,7 +108,8 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 		function rebuild(ctx: ExtensionContext): void {
 			clearPendingExhaustion();
 			activeContext = ctx;
-			catalog = readCatalog();
+			response = undefined;
+			catalog = withRuntimeProviders(readCatalog(), ctx.modelRegistry);
 			runtime = createPiRuntimeAdapter(ctx.modelRegistry);
 			if (!runtime.supported) {
 				engine = undefined;
@@ -217,11 +220,20 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 			activeContext = ctx;
 			if (!engine || !ctx.model) return;
 			if (exhaustionPending) return;
+			attempt = undefined;
+			response = undefined;
+			if (ctx.model.api === "pi-virtual") {
+				// Routing happens after turn_start. Never select credentials or a
+				// fallback using the virtual model's provider identity.
+				engine.resetTurn();
+				return;
+			}
 			await execute(engine.startTurn({ providerId: ctx.model.provider, model: ctx.model.id }), ctx);
 		});
 
 		pi.on("before_provider_request", (_event, ctx) => {
 			attempt = undefined;
+			response = undefined;
 			const decision = engine?.currentDecision();
 			const activeAttempt = decision && (decision.kind === "switch-key" || decision.kind === "switch-model")
 				? decision
@@ -238,14 +250,36 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 		});
 
 		pi.on("after_provider_response", (event) => {
+			response = { status: event.status, retryAfterMs: retryAfterMilliseconds(event.headers, now()) };
 			if (!attempt) return;
-			attempt.status = event.status;
-			attempt.retryAfterMs = retryAfterMilliseconds(event.headers, now());
-			if (event.status >= 200 && event.status < 300) engine?.observeSuccess();
+			Object.assign(attempt, response);
 		});
 
 		pi.on("message_end", async (event, ctx) => {
 			if (event.message.role !== "assistant") return;
+			const message = event.message;
+			// Assistant messages carry the dispatched physical identity even when
+			// ctx.model is virtual, and even when the request fails before streaming.
+			if (engine && message.provider && message.model) {
+				const provider = catalog.providers.find((entry) => entry.provider === message.provider);
+				if (!provider || message.api === "pi-virtual") {
+					attempt = undefined;
+				} else {
+					const backupKeys = provider.type === "api_key" ? provider.backupKeys : undefined;
+					const backupIndex = backupKeys?.findIndex((key) => runtime?.ownsBackupKey(provider.provider, key)) ?? -1;
+					attempt = {
+						providerId: message.provider,
+						model: message.model,
+						keySlot: backupIndex < 0 ? "primary" : backupSlot(backupIndex),
+						...response,
+					};
+					engine.recordAttempt(attempt);
+				}
+			}
+			response = undefined;
+			if (attempt?.status !== undefined && attempt.status >= 200 && attempt.status < 300) {
+				engine?.observeSuccess();
+			}
 			if (event.message.stopReason !== "error") {
 				attempt = undefined;
 				clearPendingExhaustion();
@@ -291,6 +325,7 @@ export function createFailoverExtension(options: FailoverExtensionOptions = {}) 
 			await restoreOwnedOverrides();
 			engine = undefined;
 			attempt = undefined;
+			response = undefined;
 			clearPendingExhaustion();
 			activeContext = undefined;
 		});

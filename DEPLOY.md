@@ -49,6 +49,10 @@ gh release create "$TAG" --title "$TAG" --generate-notes
 npm deprecate '<legacy-package-name>@*' 'Deprecated: migrate to pi-failover'
 ```
 
+发布前测试包括 Pi 1.1.0 的 runtime 凭证切换／恢复、虚拟模型故障归属，以及通过 `models.json` 和扩展注册的自定义 provider 发现与恢复测试。备用 key 切换保留虚拟路由，跨 provider 切换选择具体模型；发布说明应保留这一区别。
+
+开发依赖已升级至 Pi 1.1.0，修复旧版 shrinkwrap 引入的依赖审计问题。发布前同时运行 `npm run audit`；发布包不携带运行时依赖。
+
 ## 发布后检查
 
 ```bash

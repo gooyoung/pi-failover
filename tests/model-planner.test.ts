@@ -5,6 +5,7 @@ import { applyNextModel } from "../src/model-planner.ts";
 interface TestModel {
 	provider: string;
 	id: string;
+	api?: string;
 }
 
 function createContext(options: {
@@ -146,4 +147,21 @@ describe("applyNextModel", () => {
 		assert.equal(plan, undefined);
 		assert.deepEqual(harness.applied.map((model) => model.provider), ["gamma", "alpha"]);
 	});
+});
+
+
+test("provider fallback skips virtual models even when their id matches the failed model", async () => {
+	const physical = { provider: "beta", id: "physical", api: "test-api" };
+	const harness = createContext({ models: [
+		{ provider: "beta", id: "shared", api: "pi-virtual" },
+		physical,
+	] });
+	const plan = await applyNextModel(harness.ctx, {
+		authOrder: ["alpha", "beta"],
+		current: { providerId: "alpha", model: "shared" },
+		unavailableProviderIds: [],
+		cooldownProviderIds: [],
+	});
+	assert.deepEqual(plan, { providerId: "beta", model: "physical" });
+	assert.deepEqual(harness.applied, [physical]);
 });

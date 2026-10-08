@@ -33,6 +33,10 @@ export function loadAuthCatalog(options: LoadAuthCatalogOptions = {}): AuthCatal
 	try {
 		parsed = JSON.parse(fs.readFileSync(authPath, "utf-8"));
 	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			// Pi can have configured custom providers without stored credentials.
+			return { enabled: true, providers: [], diagnostics: [] };
+		}
 		return disabledCatalog(error instanceof SyntaxError ? "Could not parse auth.json" : "Could not read auth.json");
 	}
 
@@ -65,6 +69,31 @@ export function loadAuthCatalog(options: LoadAuthCatalogOptions = {}): AuthCatal
 	}
 
 	return { enabled: true, providers, diagnostics };
+}
+
+export interface RuntimeProviderCatalog {
+	getAvailable(): readonly { provider: string; api?: string }[];
+	getProviderAuthStatus(providerId: string): { configured: boolean; source?: string };
+	getRegisteredProviderIds?(): readonly string[];
+}
+
+/** Append Pi-configured custom providers without copying their credentials. */
+export function withRuntimeProviders(catalog: AuthCatalog, registry: RuntimeProviderCatalog): AuthCatalog {
+	if (!catalog.enabled) return catalog;
+	const providers = [...catalog.providers];
+	const seen = new Set(providers.map((entry) => entry.provider));
+	const registered = new Set(registry.getRegisteredProviderIds?.() ?? []);
+	for (const model of registry.getAvailable()) {
+		if (model.api === "pi-virtual" || seen.has(model.provider)) continue;
+		const status = registry.getProviderAuthStatus(model.provider);
+		if (!status.configured) continue;
+		const custom = registered.has(model.provider) ||
+			status.source === "models_json_key" || status.source === "models_json_command" || status.source === "fallback";
+		if (!custom) continue;
+		providers.push({ provider: model.provider, type: "api_key" });
+		seen.add(model.provider);
+	}
+	return { ...catalog, providers };
 }
 
 function normalizeBackupKeys(value: unknown): string[] | undefined {

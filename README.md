@@ -79,7 +79,7 @@ If all failover options are exhausted while Pi still has a built-in automatic re
 
 - `pi-failover` never reads or writes `keyrouter.json`.
 - `"key-backup"` contains one or more keys for the same provider, not provider fallbacks.
-- Provider fallback order follows the top-level insertion order in `auth.json`.
+- Provider fallback order follows the top-level insertion order in `auth.json`, followed by custom providers discovered from Pi in model-registry order.
 - OAuth entries can participate in provider fallback, but they do not support `"key-backup"`.
 - Every `"key-backup"` value is treated as a literal string. Values are not expanded from environment variables or commands.
 - Pi's `/login` flow can rewrite `auth.json` and remove unknown extension fields, so `"key-backup"` may need to be re-added after logging in again.
@@ -99,6 +99,51 @@ Within one user request, failed credentials and providers are disabled or cooled
 When switching providers, `pi-failover` prefers the current model ID. If that model is unavailable on the next provider, it uses that provider's first available model. The extension calls Pi's `setModel()`, so the new default model persists. There is no automatic failback to the original provider later.
 
 Status and warning messages identify credential slots without exposing values: the primary credential is `primary`, the first backup is `backup`, and later backups are `backup-2`, `backup-3`, and so on.
+
+## Custom Providers
+
+Custom providers defined in Pi's `models.json` or registered by provider extensions can participate in provider failover even when they are absent from `auth.json`. The extension discovers available physical chat models with configured credentials at session startup and on `/failover reload`. Providers listed in `auth.json` come first; discovered custom providers are appended once, in model-registry order. To control their order explicitly, store their credentials in `auth.json` in the desired order.
+
+For example, define an OpenAI-compatible endpoint in Pi's existing `~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "my-endpoint": {
+      "baseUrl": "https://example.invalid/v1",
+      "api": "openai-completions",
+      "apiKey": "$CUSTOM_API_KEY",
+      "models": [{ "id": "my-chat-model" }]
+    }
+  }
+}
+```
+
+Replace the example URL/model and set `CUSTOM_API_KEY`. Pi loads and authenticates the provider; `pi-failover` uses Pi's registry and does not read another configuration file itself. After changing or registering providers, refresh them in Pi and run `/failover reload`.
+
+For **backup-key failover**, place the primary credential and ordered backups under the exact same provider ID in `auth.json`:
+
+```json
+{
+  "my-endpoint": {
+    "type": "api_key",
+    "key": "$CUSTOM_API_KEY",
+    "key-backup": ["backup-api-key-1", "backup-api-key-2"]
+  }
+}
+```
+
+Without backups, a handled failure moves directly to another configured provider. Providers need an available physical chat model and usable authentication; an endpoint URL alone is insufficient. A missing `auth.json` is allowed for runtime-configured custom providers; malformed or unreadable files still disable failover. The extension never creates or rewrites the file.
+
+## Pi 1.0 Virtual Models
+
+For virtual selections such as `router/auto`, failover uses the physical provider and model recorded on the assistant response. A backup-key switch keeps the virtual selection and its routing logic. If routing chooses a different provider on the retry, the failure is attributed to that provider's active credential.
+
+Provider failover selects a physical model through `setModel()`, replacing the virtual selection. Virtual models are excluded from fallback candidates, so the router cannot immediately route that continuation back to the failed provider. The physical selection persists until you change it manually.
+
+Pi's request hooks do not expose the dispatched model before the request. For virtual selections, credential rotation therefore happens after a failed physical response; the extension does not prevent the router from initially choosing a cooling provider or automatically restore the primary key after its cooldown. Selecting a physical model resumes credential selection before each turn; `/failover reload` restores extension-owned overrides.
+
+This extension handles main chat assistant failures. Codemode classifier/image requests and compaction requests do not have independent failover support. Router errors that do not dispatch a physical model keep Pi's normal error handling.
 
 ## Commands
 
@@ -135,5 +180,7 @@ npm run typecheck
 npm run audit
 npm pack --dry-run
 ```
+
+The development dependency and runtime integration tests use Pi 1.1.0. The peer dependency remains `>=0.84.2`; source type checking and the core regression suite also pass against Pi 0.84.2.
 
 `npm run audit` checks the dev-only dependency tree against the official npm registry. The published package ships no runtime dependencies.

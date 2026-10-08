@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadAuthCatalog } from "../src/auth-catalog.ts";
+import { loadAuthCatalog, withRuntimeProviders } from "../src/auth-catalog.ts";
 
 let tmp: string;
 let authPath: string;
@@ -160,4 +160,47 @@ describe("loadAuthCatalog", () => {
 		assert.equal(catalog.enabled, false);
 		assert.deepEqual(catalog.diagnostics, [{ message: "Expected auth.json to contain an object" }]);
 	});
+});
+
+
+test("missing auth.json permits providers configured in Pi without creating a file", () => {
+	const catalog = loadAuthCatalog({ authPath });
+	assert.deepEqual(catalog, { enabled: true, providers: [], diagnostics: [] });
+	assert.equal(fs.existsSync(authPath), false);
+});
+
+test("unreadable auth.json remains disabled", () => {
+	fs.mkdirSync(authPath);
+	assert.equal(loadAuthCatalog({ authPath }).enabled, false);
+});
+
+test("runtime discovery preserves auth order and backups, deduplicates models and skips unavailable and virtual-only providers", () => {
+	const catalog = { enabled: true, providers: [
+		{ provider: "auth-second", type: "api_key" as const, backupKeys: ["test-backup"] },
+		{ provider: "auth-first", type: "oauth" as const },
+	], diagnostics: [] };
+	const merged = withRuntimeProviders(catalog, {
+		getAvailable: () => [
+			{ provider: "custom", api: "test-api" },
+			{ provider: "auth-first" },
+			{ provider: "custom", api: "test-api" },
+			{ provider: "unavailable" },
+			{ provider: "virtual", api: "pi-virtual" },
+			{ provider: "native" },
+			{ provider: "builtin" },
+		],
+		getProviderAuthStatus: (id) => ({ configured: id !== "unavailable", source: id === "builtin" ? "environment" : "models_json_key" }),
+		getRegisteredProviderIds: () => ["native", "virtual"],
+	});
+	assert.deepEqual(merged.providers.map((entry) => entry.provider), ["auth-second", "auth-first", "custom", "native"]);
+	assert.deepEqual(merged.providers[0]?.backupKeys, ["test-backup"]);
+	assert.equal(catalog.providers.length, 2);
+});
+
+test("runtime discovery does not bypass malformed auth configuration", () => {
+	const catalog = { enabled: false, providers: [], diagnostics: [{ message: "Could not parse auth.json" }] };
+	assert.equal(withRuntimeProviders(catalog, {
+		getAvailable() { throw new Error("Disabled catalogs must not discover providers"); },
+		getProviderAuthStatus() { return { configured: true }; },
+	}), catalog);
 });

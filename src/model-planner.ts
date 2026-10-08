@@ -3,6 +3,7 @@ import type { ProviderPlan } from "./failover-engine.ts";
 export interface PlannerModel {
 	provider: string;
 	id: string;
+	api?: string;
 }
 
 export interface ModelPlannerContext<TModel extends PlannerModel = PlannerModel> {
@@ -36,7 +37,7 @@ export async function applyNextModel<TModel extends PlannerModel>(
 	for (const providerId of ordered) {
 		if (unavailable.has(providerId) || cooling.has(providerId)) continue;
 		if (!ctx.modelRegistry.getProviderAuthStatus(providerId).configured) continue;
-		const providerModels = available.filter((candidate) => candidate.provider === providerId);
+		const providerModels = available.filter((candidate) => candidate.provider === providerId && candidate.api !== "pi-virtual");
 		const model = providerModels.find((candidate) => candidate.id === request.current.model) ?? providerModels[0];
 		if (!model) continue;
 		try {

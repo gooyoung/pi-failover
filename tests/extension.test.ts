@@ -8,6 +8,7 @@ type Handler = (event: any, ctx: any) => unknown | Promise<unknown>;
 interface TestModel {
 	provider: string;
 	id: string;
+	api?: string;
 }
 
 type ExtensionMode = "tui" | "rpc" | "json" | "print";
@@ -31,6 +32,8 @@ function createHarness(options: {
 	setRuntimeKey?: (providerId: string, key: string) => void | Promise<void>;
 	removeRuntimeKey?: (providerId: string, attempt: number) => void | Promise<void>;
 	runtimeSupported?: boolean;
+	authSources?: Record<string, string>;
+	registeredProviderIds?: string[];
 	hasUI?: boolean;
 	mode?: ExtensionMode;
 } = {}) {
@@ -77,11 +80,14 @@ function createHarness(options: {
 		getProviderAuthStatus(providerId: string) {
 			return {
 				configured: resolvedKeys.has(providerId),
-				source: runtimeProviders.has(providerId) ? "runtime" : "stored",
+				source: runtimeProviders.has(providerId) ? "runtime" : options.authSources?.[providerId] ?? "stored",
 			};
 		},
 		getAvailable() {
 			return models;
+		},
+		getRegisteredProviderIds() {
+			return options.registeredProviderIds ?? [];
 		},
 	};
 	const mode = options.mode ?? "tui";
@@ -1045,4 +1051,189 @@ test("reload and shutdown restore the owned backup and keep status and warning n
 		JSON.stringify(harness.notificationCalls),
 		new RegExp(`${alphaBackup}|${betaBackup}|alpha-primary-secret|beta-primary-secret`),
 	);
+});
+
+function routedHarness() {
+	const harness = createHarness({ models: [
+		{ provider: "alpha", id: "shared" },
+		{ provider: "beta", id: "shared" },
+	] });
+	harness.ctx.model = { provider: "router", id: "auto", api: "pi-virtual" };
+	installExtension(harness, [
+		{ provider: "alpha", type: "api_key", backupKeys: ["test-backup-one", "test-backup-two"] },
+		{ provider: "beta", type: "api_key" },
+	]);
+	return harness;
+}
+
+async function routedFailure(harness: ExtensionHarness, options: {
+	provider?: string; status?: number; errorMessage: string; headers?: Record<string, string>; api?: string;
+}) {
+	await harness.emit("before_provider_request", { payload: {} });
+	if (options.status !== undefined) {
+		await harness.emit("after_provider_response", { status: options.status, headers: options.headers ?? {} });
+	}
+	const message = { ...assistantError(options.errorMessage), provider: options.provider ?? "alpha", model: "shared", api: options.api ?? "test-api" };
+	return { message, result: await harness.emit("message_end", { message }) };
+}
+
+for (const status of [401, 429]) {
+	test(`virtual selection attributes ${status} to the physical credential and preserves routing`, async () => {
+		const harness = routedHarness();
+		await startSessionTurn(harness);
+		assert.deepEqual(harness.appliedModels, []);
+		const { message, result } = await routedFailure(harness, { status, errorMessage: `HTTP ${status}` });
+		assertHiddenRetry(result, message);
+		assert.deepEqual(harness.setKeyCalls, [{ providerId: "alpha", key: "test-backup-one" }]);
+		assert.equal(harness.ctx.model.provider, "router");
+		assert.deepEqual(harness.sentMessageCalls, [retryMessageCall]);
+
+		await startSessionTurn(harness, 1);
+		await routedFailure(harness, { status, errorMessage: `HTTP ${status}` });
+		assert.deepEqual(harness.setKeys, ["test-backup-one", "test-backup-two"]);
+	});
+}
+
+for (const errorMessage of ["fetch failed", "request timed out", "503 temporarily unavailable"]) {
+	test(`virtual selection falls back to a physical model for ${errorMessage}`, async () => {
+		const harness = routedHarness();
+		await startSessionTurn(harness);
+		const { message, result } = await routedFailure(harness, { errorMessage });
+		assertHiddenRetry(result, message);
+		assert.deepEqual(harness.setKeys, []);
+		assert.deepEqual(harness.appliedModels, [{ provider: "beta", id: "shared" }]);
+		assert.equal(harness.ctx.model.provider, "beta");
+	});
+}
+
+test("virtual routing errors and unconfigured physical providers do not disable configured credentials", async () => {
+	const harness = routedHarness();
+	await startSessionTurn(harness);
+	for (const options of [
+		{ provider: "alpha", api: "pi-virtual" },
+		{ provider: "outside", api: "test-api" },
+	]) {
+		const { result } = await routedFailure(harness, { ...options, status: 401, errorMessage: "unauthorized" });
+		assert.equal(result, undefined);
+	}
+	assert.deepEqual(harness.setKeys, []);
+	assert.deepEqual(harness.sentMessageCalls, []);
+});
+
+test("virtual requests clear stale HTTP metadata before a network failure", async () => {
+	const harness = routedHarness();
+	await startSessionTurn(harness);
+	await harness.emit("before_provider_request", { payload: {} });
+	await harness.emit("after_provider_response", { status: 401, headers: {} });
+	await routedFailure(harness, { errorMessage: "fetch failed" });
+	assert.deepEqual(harness.setKeys, []);
+	assert.equal(harness.ctx.model.provider, "beta");
+});
+
+test("routed backup exhaustion retains the actual credential until agent settlement", async () => {
+	const harness = routedHarness();
+	await startSessionTurn(harness);
+	await routedFailure(harness, { status: 401, errorMessage: "unauthorized" });
+	await startSessionTurn(harness, 1);
+	await routedFailure(harness, { status: 401, errorMessage: "unauthorized" });
+	// Exclude the fallback provider so exhaustion is deterministic.
+	harness.resolvedKeys.delete("beta");
+	await startSessionTurn(harness, 2);
+	const { result } = await routedFailure(harness, { status: 401, errorMessage: "unauthorized" });
+	assert.equal(result, undefined);
+	assert.deepEqual(harness.removedProviders, []);
+	await harness.emit("agent_settled", {});
+	assert.deepEqual(harness.removedProviders, ["alpha"]);
+});
+
+
+test("a virtual retry routed to another provider uses that provider's credential", async () => {
+	const harness = routedHarness();
+	await startSessionTurn(harness);
+	await routedFailure(harness, { status: 401, errorMessage: "unauthorized" });
+	await startSessionTurn(harness, 1);
+	await routedFailure(harness, { provider: "beta", status: 503, errorMessage: "unavailable" });
+	// Alpha's primary was disabled earlier, so provider fallback must use its backup.
+	assert.deepEqual(harness.appliedModels, [{ provider: "alpha", id: "shared" }]);
+	assert.deepEqual(harness.setKeys, ["test-backup-one"]);
+	await harness.runCommand("failover-status", "");
+	assert.match(harness.notifications.at(-1) ?? "", /beta: cooling/);
+});
+
+test("provider fallback skips a provider with only virtual models", async () => {
+	const harness = createHarness({ models: [
+		{ provider: "alpha", id: "shared" },
+		{ provider: "beta", id: "shared", api: "pi-virtual" },
+		{ provider: "gamma", id: "shared" },
+	] });
+	installExtension(harness, [
+		{ provider: "alpha", type: "api_key" },
+		{ provider: "beta", type: "api_key" },
+		{ provider: "gamma", type: "api_key" },
+	]);
+	await startSessionTurn(harness);
+	await failAttempt(harness, { status: 503, errorMessage: "unavailable" });
+	assert.deepEqual(harness.appliedModels, [{ provider: "gamma", id: "shared" }]);
+});
+
+test("a successful routed Pi retry clears exhaustion and keeps its backup", async () => {
+	const harness = routedHarness();
+	harness.resolvedKeys.delete("beta");
+	await startSessionTurn(harness);
+	for (let index = 0; index < 3; index += 1) {
+		if (index > 0) await startSessionTurn(harness, index);
+		await routedFailure(harness, { status: 429, errorMessage: "rate limited", headers: { "Retry-After": "120" } });
+	}
+	await startSessionTurn(harness, 3);
+	await harness.emit("before_provider_request", { payload: {} });
+	await harness.emit("after_provider_response", { status: 200, headers: {} });
+	await harness.emit("message_end", { message: {
+		role: "assistant", provider: "alpha", model: "shared", api: "test-api", stopReason: "stop", content: [],
+	} });
+	await harness.emit("agent_settled", {});
+	assert.deepEqual(harness.removedProviders, []);
+	await harness.runCommand("failover-status", "");
+	assert.match(harness.notifications.at(-1) ?? "", /backup-2=healthy/);
+	assert.doesNotMatch(harness.notifications.join("\n"), /all configured providers exhausted/);
+});
+
+
+for (const source of ["models_json_key", "models_json_command", "fallback"]) {
+	test(`discovers custom ${source} providers absent from auth.json and switches between them`, async () => {
+		const harness = createHarness({
+			models: [{ provider: "custom-one", id: "chat" }, { provider: "custom-two", id: "chat" }],
+			authSources: { "custom-one": source, "custom-two": source },
+		});
+		installExtension(harness, []);
+		await startSessionTurn(harness);
+		await failAttempt(harness, { status: 503, errorMessage: "unavailable" });
+		assert.deepEqual(harness.appliedModels, [{ provider: "custom-two", id: "chat" }]);
+		assert.deepEqual(harness.sentMessageCalls, [retryMessageCall]);
+	});
+}
+
+test("custom configured primary rotates through auth.json backups and restores configured auth", async () => {
+	const harness = createHarness({ authSources: { alpha: "models_json_key" } });
+	installExtension(harness, [{ provider: "alpha", type: "api_key", backupKeys: ["test-custom-backup"] }]);
+	await startSessionTurn(harness);
+	await failAttempt(harness, { status: 401, errorMessage: "unauthorized" });
+	assert.deepEqual(harness.setKeys, ["test-custom-backup"]);
+	await harness.runCommand("failover-reload", "");
+	assert.deepEqual(harness.removedProviders, ["alpha"]);
+	assert.equal(harness.resolvedKeys.get("alpha"), "alpha-primary-secret");
+});
+
+test("reload discovers newly registered custom providers", async () => {
+	const registeredProviderIds: string[] = [];
+	const harness = createHarness({
+		models: [{ provider: "alpha", id: "chat" }, { provider: "custom", id: "chat" }],
+		registeredProviderIds,
+	});
+	installExtension(harness, [{ provider: "alpha", type: "api_key" }]);
+	await startSessionTurn(harness);
+	registeredProviderIds.push("custom");
+	await harness.runCommand("failover-reload", "");
+	await startSessionTurn(harness, 1);
+	await failAttempt(harness, { status: 503, errorMessage: "unavailable" });
+	assert.deepEqual(harness.appliedModels, [{ provider: "custom", id: "chat" }]);
 });

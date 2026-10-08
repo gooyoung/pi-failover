@@ -122,11 +122,25 @@ export class FailoverEngine {
 	}
 
 	startTurn(initial: ProviderPlan): FailoverDecision {
-		this.visitedKeys = new Set();
-		this.visitedProviders = new Set();
-		this.active = undefined;
+		this.resetTurn();
 
 		return this.selectPlan(initial, "switch-key") ?? this.selectFallback(initial);
+	}
+
+	/** Reset a turn whose physical model will only be known after routing. */
+	resetTurn(): void {
+		this.visitedKeys.clear();
+		this.visitedProviders.clear();
+		this.active = undefined;
+		this.decision = { kind: "none" };
+	}
+
+	/** Record the credential actually used, without selecting a new one. */
+	recordAttempt(attempt: FailoverAttempt): boolean {
+		if (!this.resumeAttempt(attempt)) return false;
+		this.visitedProviders.add(attempt.providerId);
+		this.visitedKeys.add(this.keyId(attempt.providerId, attempt.keySlot));
+		return true;
 	}
 
 	observeFailure(observation: FailureObservation): FailoverDecision {

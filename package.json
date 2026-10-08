@@ -1,6 +1,6 @@
 {
 	"name": "pi-failover",
-	"version": "0.1.8",
+	"version": "0.1.9",
 	"description": "Automatic API credential and provider failover for Pi coding agent.",
 	"repository": {
 		"type": "git",
@@ -55,7 +55,7 @@
 		"node": ">=22"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-coding-agent": "0.84.2",
+		"@earendil-works/pi-coding-agent": "1.1.0",
 		"@types/node": "^25.9.1",
 		"tsx": "^4.19.0",
 		"typescript": "^6.0.3"

@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { withRuntimeProviders } from "../src/auth-catalog.ts";
 import { createPiRuntimeAdapter } from "../src/pi-runtime.ts";
 
 type PiRuntimeModule = typeof import("../src/pi-runtime.ts");
@@ -266,3 +271,77 @@ describe("createPiRuntimeAdapter", () => {
 		assert.equal(harness.resolvedKeys.get("alpha"), "stored-primary");
 	});
 });
+
+
+test("Pi runtime sets backups and restores stored and pre-existing runtime credentials", async () => {
+	const runtime = await ModelRuntime.create({
+		modelsPath: null,
+		allowModelNetwork: false,
+		refreshOnCreate: false,
+		credentials: {
+			async read(providerId) {
+				return providerId === "anthropic" ? { type: "api_key" as const, key: "test-stored-key" } : undefined;
+			},
+			async list() { return [{ providerId: "anthropic", type: "api_key" as const }]; },
+			async modify() { throw new Error("Test must not modify persisted credentials"); },
+			async delete() { throw new Error("Test must not delete persisted credentials"); },
+		},
+	});
+	const registry = new ModelRegistry(runtime);
+	const adapter = createPiRuntimeAdapter(registry);
+	assert.equal(adapter.supported, true);
+	assert.deepEqual(await adapter.setBackupKey("anthropic", "test-backup-key"), { ok: true, action: "set" });
+	assert.equal(await registry.getApiKeyForProvider("anthropic"), "test-backup-key");
+	assert.equal(registry.getProviderAuthStatus("anthropic").source, "runtime");
+	assert.deepEqual(await adapter.restoreOriginalKey("anthropic"), { ok: true, action: "removed" });
+	assert.equal(await registry.getApiKeyForProvider("anthropic"), "test-stored-key");
+
+	await runtime.setRuntimeApiKey("anthropic", "test-original-runtime-key");
+	await adapter.setBackupKey("anthropic", "test-backup-one");
+	await adapter.setBackupKey("anthropic", "test-backup-two");
+	assert.deepEqual(await adapter.restoreOriginalKey("anthropic"), { ok: true, action: "restored" });
+	assert.equal(await registry.getApiKeyForProvider("anthropic"), "test-original-runtime-key");
+	assert.equal(adapter.hasOwnedOverride("anthropic"), false);
+});
+
+
+for (const registration of ["models.json", "extension"]) {
+	test(`Pi custom provider from ${registration} is discovered and configured auth survives backup cleanup`, async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-failover-custom-"));
+		try {
+			const config = {
+				baseUrl: "https://example.invalid/v1", api: "openai-completions" as const,
+				apiKey: "test-configured-primary", models: [{
+					id: "custom-chat", name: "Custom chat", input: ["text" as const], reasoning: false,
+					contextWindow: 8192, maxTokens: 1024,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				}],
+			};
+			const modelsPath = join(dir, "models.json");
+			writeFileSync(modelsPath, JSON.stringify({ providers: registration === "models.json" ? { "custom-endpoint": config } : {} }));
+			const runtime = await ModelRuntime.create({
+				modelsPath, modelsStorePath: join(dir, "models-store.json"), allowModelNetwork: false,
+				credentials: {
+					async read() { return undefined; }, async list() { return []; },
+					async modify() { throw new Error("Must not persist credentials"); },
+					async delete() { throw new Error("Must not delete credentials"); },
+				},
+			});
+			const registry = new ModelRegistry(runtime);
+			if (registration === "extension") {
+				registry.registerProvider("custom-endpoint", config);
+				await registry.refresh({ allowNetwork: false });
+			}
+			const catalog = withRuntimeProviders({ enabled: true, providers: [], diagnostics: [] }, registry);
+			assert.ok(catalog.providers.some((entry) => entry.provider === "custom-endpoint"));
+			assert.equal(await registry.getApiKeyForProvider("custom-endpoint"), "test-configured-primary");
+			const adapter = createPiRuntimeAdapter(registry);
+			assert.deepEqual(await adapter.setBackupKey("custom-endpoint", "test-custom-backup"), { ok: true, action: "set" });
+			assert.equal(await registry.getApiKeyForProvider("custom-endpoint"), "test-custom-backup");
+			assert.deepEqual(await adapter.restoreOriginalKey("custom-endpoint"), { ok: true, action: "removed" });
+			assert.equal(await registry.getApiKeyForProvider("custom-endpoint"), "test-configured-primary");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+}

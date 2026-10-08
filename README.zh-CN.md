@@ -79,7 +79,7 @@ pi install npm:pi-failover
 
 - `pi-failover` 不会读取或写入 `keyrouter.json`。
 - `"key-backup"` 表示同一 provider 的一把或多把备用 key，不表示 provider 级切换。
-- provider 的切换顺序由 `auth.json` 顶层字段的插入顺序决定。
+- provider 优先按 `auth.json` 顶层字段的插入顺序切换，再按 Pi 模型注册表顺序追加发现的自定义 provider。
 - OAuth 条目可以参与 provider 级切换，但不支持 `"key-backup"`。
 - `"key-backup"` 中的每个值都按字面量字符串处理，不支持从环境变量或命令动态展开。
 - Pi 的 `/login` 流程可能会重写 `auth.json` 并移除未知扩展字段，因此重新登录后可能需要再次补上 `"key-backup"`。
@@ -99,6 +99,51 @@ pi install npm:pi-failover
 发生 provider 切换时，`pi-failover` 会优先保留当前 model ID；如果目标 provider 没有该 model，则退回到该 provider 的第一个可用 model。扩展内部会调用 Pi 的 `setModel()`，因此新的默认 model 会持续生效；后续不会自动切回原 provider。
 
 状态和警告信息只显示脱敏后的凭证槽位：主凭证为 `primary`，第一把备用凭证为 `backup`，后续依次为 `backup-2`、`backup-3`……
+
+## 自定义 Provider
+
+通过 Pi 的 `models.json` 定义或由 provider 扩展注册的自定义 provider，即使没有出现在 `auth.json` 中，也可以参与 provider 故障切换。扩展在会话启动及执行 `/failover reload` 时，从 Pi 模型注册表发现凭证已配置、具体聊天模型可用的 provider。`auth.json` 中的 provider 优先，发现的自定义 provider 按模型注册表顺序追加一次。如果需要明确控制顺序，将它们的凭证按所需顺序写入 `auth.json`。
+
+例如，在 Pi 现有的 `~/.pi/agent/models.json` 中定义 OpenAI 兼容端点：
+
+```json
+{
+  "providers": {
+    "my-endpoint": {
+      "baseUrl": "https://example.invalid/v1",
+      "api": "openai-completions",
+      "apiKey": "$CUSTOM_API_KEY",
+      "models": [{ "id": "my-chat-model" }]
+    }
+  }
+}
+```
+
+替换示例 URL 和模型名，并设置 `CUSTOM_API_KEY`。provider 的加载和认证由 Pi 完成；`pi-failover` 使用 Pi 的注册表，不自行读取其他配置文件。修改或注册 provider 后，先在 Pi 中刷新，再执行 `/failover reload`。
+
+如果还需要**备用 key 切换**，在 `auth.json` 中使用完全相同的 provider ID，配置主凭证及有序备用凭证：
+
+```json
+{
+  "my-endpoint": {
+    "type": "api_key",
+    "key": "$CUSTOM_API_KEY",
+    "key-backup": ["backup-api-key-1", "backup-api-key-2"]
+  }
+}
+```
+
+没有备用 key 时，已接管的故障会直接切到其他已配置 provider。provider 需要有可用的具体聊天模型和有效认证，仅配置端点 URL 不够。仅使用运行时已配置的自定义 provider 时，允许 `auth.json` 不存在；文件格式错误或无法读取时仍禁用 failover。扩展不会创建或重写该文件。
+
+## Pi 1.0 虚拟模型
+
+选择 `router/auto` 等虚拟模型时，扩展根据 assistant 响应记录的实际 provider 和 model 归属故障。切换备用 key 时保留虚拟模型选择及其路由逻辑。如果重试时路由选择了其他 provider，故障会归属到该 provider 实际使用的凭证。
+
+跨 provider 切换会通过 `setModel()` 选择具体模型，替换原来的虚拟模型选择。虚拟模型不会作为 provider 故障切换的候选，避免路由立即把续跑请求送回故障 provider。该具体模型选择会持续生效，直到手动修改。
+
+Pi 的请求钩子不会在请求前暴露实际模型。因此，虚拟模型的凭证切换发生在实际请求失败之后；扩展无法阻止路由首次选择处于冷却中的 provider，也不会在冷却结束后自动恢复主 key。选择具体模型后会恢复每轮请求前的凭证选择；`/failover reload` 可恢复扩展接管的 override。
+
+扩展处理主聊天 assistant 的故障。codemode 的分类器／图像请求及压缩请求没有独立的 failover 支持。未派发到具体模型的路由错误仍由 Pi 正常处理。
 
 ## 命令
 
@@ -135,5 +180,7 @@ npm run typecheck
 npm run audit
 npm pack --dry-run
 ```
+
+开发依赖及 runtime 集成测试使用 Pi 1.1.0，peer dependency 仍为 `>=0.84.2`；源码类型检查和核心回归测试也已在 Pi 0.84.2 下通过。
 
 `npm run audit` 对官方 npm registry 检查仅用于开发的依赖树。发布包不携带任何运行时依赖。
